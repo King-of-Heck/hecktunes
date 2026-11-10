@@ -44,6 +44,17 @@ fn collect_files(path: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
+/// `CD1`, `CD 2`, `Disc 1`, `Disk3`... (case-insensitive) -> the disc number.
+fn disc_folder_number(dir: &Path) -> Option<u32> {
+    let name = dir.file_name()?.to_string_lossy().to_lowercase();
+    let rest = ["disc", "disk", "cd"].iter().find_map(|p| name.strip_prefix(p))?;
+    let digits = rest.strip_prefix(' ').unwrap_or(rest);
+    if digits.is_empty() || !digits.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    digits.parse().ok().filter(|n| *n > 0)
+}
+
 pub fn scan_paths(paths: &[PathBuf]) -> ScanResult {
     let mut files = Vec::new();
     for p in paths {
@@ -62,8 +73,16 @@ pub fn scan_paths(paths: &[PathBuf]) -> ScanResult {
             continue;
         }
         match read_source_track(&f) {
-            Ok(t) => {
+            Ok(mut t) => {
                 let dir = f.parent().map(Path::to_path_buf).unwrap_or_default();
+                // Disc folders (Album/CD1, Album/CD2) merge under their parent; the folder number
+                // stands in for a missing disc tag.
+                let disc = disc_folder_number(&dir);
+                let dir = match (disc, dir.parent()) {
+                    (Some(_), Some(parent)) => parent.to_path_buf(),
+                    _ => dir,
+                };
+                t.disc_no = t.disc_no.or(disc);
                 let album = t.album.clone().unwrap_or_default().to_lowercase();
                 groups.entry((dir, album)).or_default().push(t);
             }
@@ -83,7 +102,7 @@ pub fn scan_paths(paths: &[PathBuf]) -> ScanResult {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::{tagged_wav, write_wav};
+    use crate::test_support::{tagged_wav, wav_without_disc, write_wav};
     use std::fs;
 
     #[test]
@@ -136,5 +155,46 @@ mod tests {
         let r = scan_paths(&[dir.path().to_path_buf()]);
         assert!(r.groups.is_empty());
         assert_eq!(r.skipped.len(), 1);
+    }
+
+    #[test]
+    fn disc_subfolders_merge_into_one_album_with_inferred_discs() {
+        let dir = tempfile::tempdir().unwrap();
+        let album = dir.path().join("Album");
+        for d in ["CD1", "cd 2", "Bonus"] {
+            fs::create_dir_all(album.join(d)).unwrap();
+        }
+        wav_without_disc(&album.join("CD1").join("b.wav"), 1, "1-2", "Alb", 2);
+        wav_without_disc(&album.join("CD1").join("a.wav"), 1, "1-1", "Alb", 1);
+        wav_without_disc(&album.join("cd 2").join("a.wav"), 1, "2-1", "alb", 1);
+        // Not a disc folder: stays its own album even with the same album tag.
+        wav_without_disc(&album.join("Bonus").join("x.wav"), 1, "bonus", "Alb", 1);
+
+        let r = scan_paths(&[album.clone()]);
+        assert_eq!(r.groups.len(), 2, "{:?}", r.groups.iter().map(|g| &g.source_dir).collect::<Vec<_>>());
+        let g = r.groups.iter().find(|g| g.tracks.len() == 3).expect("merged disc album");
+        assert_eq!(g.source_dir, album);
+        let got: Vec<_> = g.tracks.iter().map(|t| (t.disc_no, t.title.clone().unwrap())).collect();
+        assert_eq!(got, vec![(Some(1), "1-1".into()), (Some(1), "1-2".into()), (Some(2), "2-1".into())]);
+    }
+
+    #[test]
+    fn disc_folder_names_are_recognised() {
+        for (name, n) in [("CD1", Some(1)), ("CD 2", Some(2)), ("Disc 1", Some(1)), ("disc2", Some(2)), ("Disk 3", Some(3))] {
+            assert_eq!(disc_folder_number(Path::new(name)), n, "{name}");
+        }
+        for name in ["CDs", "Discography", "Bonus", "CD", "Disc 1 (Live)"] {
+            assert_eq!(disc_folder_number(Path::new(name)), None, "{name}");
+        }
+    }
+
+    #[test]
+    fn disc_tag_wins_over_folder_number() {
+        let dir = tempfile::tempdir().unwrap();
+        let cd2 = dir.path().join("Album").join("CD2");
+        fs::create_dir_all(&cd2).unwrap();
+        tagged_wav(&cd2.join("a.wav"), 1, "t", "Alb", "Band", 1); // disc tag 1
+        let r = scan_paths(&[cd2]);
+        assert_eq!(r.groups[0].tracks[0].disc_no, Some(1));
     }
 }

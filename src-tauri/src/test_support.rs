@@ -44,6 +44,22 @@ pub fn tagged_wav(path: &Path, secs: u32, title: &str, album: &str, artist: &str
     .unwrap();
 }
 
+
+/// WAV with title/album/track tags but no disc number tag.
+#[allow(dead_code)]
+pub fn wav_without_disc(path: &Path, secs: u32, title: &str, album: &str, track: u32) {
+    use lofty::prelude::*;
+    write_wav(path, secs);
+    let mut tf = lofty::read_from_path(path).unwrap();
+    let tag_type = tf.primary_tag_type();
+    tf.insert_tag(lofty::tag::Tag::new(tag_type));
+    let tag = tf.tag_mut(tag_type).unwrap();
+    tag.set_title(title.into());
+    tag.set_album(album.into());
+    tag.set_track(track);
+    tag.save_to_path(path, lofty::config::WriteOptions::default()).unwrap();
+}
+
 pub fn png_bytes(w: u32, h: u32) -> Vec<u8> {
     let img = image::RgbImage::from_pixel(w, h, image::Rgb([200, 30, 30]));
     let mut out = std::io::Cursor::new(Vec::new());

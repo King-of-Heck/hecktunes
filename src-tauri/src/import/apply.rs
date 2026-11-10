@@ -143,6 +143,8 @@ pub fn pick_cover(group: &AlbumGroup, online: Option<Vec<u8>>) -> Option<Vec<u8>
     online
         .or_else(|| group.tracks.iter().take(4).find_map(|t| embedded_cover(&t.path)))
         .or_else(|| find_folder_cover(&group.source_dir))
+        // Merged disc folders (Album/CD1, ...) often keep the art next to the first disc's files.
+        .or_else(|| group.tracks.first().and_then(|t| t.path.parent()).and_then(find_folder_cover))
 }
 
 /// Creates a fresh album folder under `root`, adding " [2]", " [3]"... if the name is taken.
@@ -516,5 +518,17 @@ mod tests {
         let tags = plan_tags(&group, Some(&candidate("m", "Alb", "Band", &FOUR)));
         let got: Vec<_> = tags.iter().map(|t| t.title.as_str()).collect();
         assert_eq!(got, vec!["One", "Two"]);
+    }
+
+    #[test]
+    fn pick_cover_finds_folder_art_inside_a_disc_folder() {
+        let (_d, src, _lib) = setup();
+        let cd1 = src.join("CD1");
+        fs::create_dir(&cd1).unwrap();
+        crate::test_support::wav_without_disc(&cd1.join("a.wav"), 1, "t", "Alb", 1);
+        fs::write(cd1.join("folder.jpg"), b"discart").unwrap();
+        let group = scan_paths(&[src.clone()]).groups.remove(0);
+        assert_eq!(group.source_dir, src);
+        assert_eq!(pick_cover(&group, None), Some(b"discart".to_vec()));
     }
 }
