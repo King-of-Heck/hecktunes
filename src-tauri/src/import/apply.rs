@@ -1,4 +1,5 @@
 use crate::artwork::{find_folder_cover, prepare_cover};
+use crate::identify::score::DURATION_TOLERANCE_MS;
 use crate::import::scan::AlbumGroup;
 use crate::library::{paths, Library, NewAlbum, NewTrack};
 use crate::model::{ReleaseCandidate, TrackTags};
@@ -17,13 +18,56 @@ pub fn plan_tags(group: &AlbumGroup, release: Option<&ReleaseCandidate>) -> Vec<
     }
 }
 
+/// For each source track, the index of the release track it corresponds to (None if the release
+/// has fewer tracks). Matches by (disc, track number) first, then by closest duration within the
+/// scoring tolerance, then by position, never assigning one release track twice.
+fn match_release_tracks(group: &AlbumGroup, r: &ReleaseCandidate) -> Vec<Option<usize>> {
+    let n = group.tracks.len();
+    let mut out: Vec<Option<usize>> = vec![None; n];
+    let mut taken = vec![false; r.tracks.len()];
+    for (i, s) in group.tracks.iter().enumerate() {
+        let Some(number) = s.track_no else { continue };
+        let disc = s.disc_no.unwrap_or(1);
+        if let Some(j) = (0..r.tracks.len()).find(|&j| !taken[j] && r.tracks[j].disc == disc && r.tracks[j].number == number) {
+            taken[j] = true;
+            out[i] = Some(j);
+        }
+    }
+    for (i, s) in group.tracks.iter().enumerate() {
+        if out[i].is_some() || s.duration_ms == 0 {
+            continue;
+        }
+        let closest = (0..r.tracks.len())
+            .filter(|&j| !taken[j])
+            .filter_map(|j| r.tracks[j].length_ms.map(|len| (j, len.abs_diff(s.duration_ms))))
+            .filter(|&(_, diff)| diff as f64 <= DURATION_TOLERANCE_MS)
+            .min_by_key(|&(_, diff)| diff);
+        if let Some((j, _)) = closest {
+            taken[j] = true;
+            out[i] = Some(j);
+        }
+    }
+    for i in 0..n {
+        if out[i].is_some() {
+            continue;
+        }
+        let j = Some(i).filter(|&j| j < taken.len() && !taken[j]).or_else(|| taken.iter().position(|t| !t));
+        if let Some(j) = j {
+            taken[j] = true;
+            out[i] = Some(j);
+        }
+    }
+    out
+}
+
 fn plan_from_release(group: &AlbumGroup, r: &ReleaseCandidate) -> Vec<TrackTags> {
     let fallback = plan_from_source(group);
+    let matched = match_release_tracks(group, r);
     group
         .tracks
         .iter()
         .enumerate()
-        .map(|(i, _)| match r.tracks.get(i) {
+        .map(|(i, _)| match matched[i].map(|j| &r.tracks[j]) {
             Some(rt) => TrackTags {
                 title: rt.title.clone(),
                 artist: rt.artist.clone(),
@@ -435,5 +479,42 @@ mod tests {
         let t = lib.album_tracks(id).unwrap().remove(0);
         assert!(!fs::metadata(&t.file_path).unwrap().permissions().readonly(), "library copy is writable");
         assert_eq!(read_source_track(&t.file_path).unwrap().title.as_deref(), Some("one"));
+    }
+
+    const FOUR: [(&str, u64); 4] = [("One", 1000), ("Two", 2000), ("Three", 3000), ("Four", 4000)];
+
+    #[test]
+    fn release_tracks_matched_by_number_when_a_track_is_missing() {
+        let (_d, src, _lib) = setup();
+        tagged_wav(&src.join("a.wav"), 1, "x", "Alb", "Band", 1);
+        tagged_wav(&src.join("b.wav"), 2, "y", "Alb", "Band", 2);
+        tagged_wav(&src.join("c.wav"), 4, "z", "Alb", "Band", 4);
+        let group = scan_paths(&[src.clone()]).groups.remove(0);
+        let tags = plan_tags(&group, Some(&candidate("m", "Alb", "Band", &FOUR)));
+        let got: Vec<_> = tags.iter().map(|t| (t.track_no, t.title.as_str())).collect();
+        assert_eq!(got, vec![(1, "One"), (2, "Two"), (4, "Four")]);
+        assert_eq!(tags[2].mb_recording_id.as_deref(), Some("rec-m-3"));
+    }
+
+    #[test]
+    fn release_tracks_matched_by_duration_without_track_numbers() {
+        let (_d, src, _lib) = setup();
+        write_wav(&src.join("a.wav"), 3);
+        write_wav(&src.join("b.wav"), 1);
+        let group = scan_paths(&[src.clone()]).groups.remove(0);
+        let tags = plan_tags(&group, Some(&candidate("m", "Alb", "Band", &FOUR)));
+        let got: Vec<_> = tags.iter().map(|t| t.title.as_str()).collect();
+        assert_eq!(got, vec!["Three", "One"]);
+    }
+
+    #[test]
+    fn release_tracks_fall_back_to_position_beyond_duration_tolerance() {
+        let (_d, src, _lib) = setup();
+        write_wav(&src.join("a.wav"), 30);
+        write_wav(&src.join("b.wav"), 31);
+        let group = scan_paths(&[src.clone()]).groups.remove(0);
+        let tags = plan_tags(&group, Some(&candidate("m", "Alb", "Band", &FOUR)));
+        let got: Vec<_> = tags.iter().map(|t| t.title.as_str()).collect();
+        assert_eq!(got, vec!["One", "Two"]);
     }
 }

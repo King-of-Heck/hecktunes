@@ -3,7 +3,7 @@ use crate::model::{ReleaseCandidate, SourceTrack};
 pub const AUTO_MIN: f64 = 0.85;
 pub const AUTO_MARGIN: f64 = 0.08;
 /// A duration difference of this many ms (or more) scores 0 for that track.
-const DURATION_TOLERANCE_MS: f64 = 10_000.0;
+pub(crate) const DURATION_TOLERANCE_MS: f64 = 10_000.0;
 
 #[derive(Debug, Clone)]
 pub struct TrackEvidence {
