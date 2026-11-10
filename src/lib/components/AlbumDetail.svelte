@@ -1,10 +1,26 @@
 <script lang="ts">
   import { albumTracks, coverUrl, formatDuration, retryMetadata } from '../api';
-  import type { AlbumRow, TrackRow } from '../types';
-  let { album, bust, settled, onBack, onEdit }: { album: AlbumRow; bust: number; settled: number; onBack: () => void; onEdit: (tracks: TrackRow[]) => void } = $props();
+  import type { AlbumRow, JobUpdate, TrackRow } from '../types';
+  let { album, bust, jobs, onBack, onEdit }: { album: AlbumRow; bust: number; jobs: Record<number, JobUpdate>; onBack: () => void; onEdit: (tracks: TrackRow[]) => void } = $props();
 
   let tracks = $state<TrackRow[]>([]);
-  let retrying = $state(false);
+  // retry_metadata returns no job id, so identify our re-identify job from the jobs map:
+  // the first job newer than the click whose label matches this album (see Worker::reimport).
+  let since = $state<number | null>(null);
+  let myJobId = $state<number | null>(null);
+  let retryError = $state<string | null>(null);
+
+  const labels = $derived([`${album.album_artist} – ${album.title}`, `album ${album.id}`]);
+  $effect(() => {
+    if (since === null || myJobId !== null) return;
+    const found = Object.values(jobs).find((j) => j.job_id > since! && labels.includes(j.label));
+    if (found) myJobId = found.job_id;
+  });
+  const terminal = (st: string) => st === 'done' || st === 'failed' || st === 'skipped';
+  // Busy from the click until our job exists and reaches a terminal state (or is cleared).
+  const retrying = $derived(
+    since !== null && (myJobId === null || (jobs[myJobId] !== undefined && !terminal(jobs[myJobId].state))),
+  );
 
   $effect(() => {
     // re-load whenever the album row (or bust counter) changes
@@ -16,19 +32,16 @@
     return () => { cancelled = true; };
   });
 
-  // A failed/skipped job leaves this album mounted: re-enable the button.
-  $effect(() => {
-    void settled;
-    retrying = false;
-  });
-
   async function fix() {
-    retrying = true;
+    retryError = null;
+    myJobId = null;
+    since = Math.max(0, ...Object.keys(jobs).map(Number));
     try {
       await retryMetadata(album.id);
     } catch (e) {
       console.error('retry_metadata failed', e);
-      retrying = false;
+      retryError = `Couldn't start lookup: ${e}`;
+      since = null;
     }
   }
 </script>
@@ -45,6 +58,7 @@
         <button onclick={() => onEdit(tracks)}>Edit tags</button>
         <button onclick={fix} disabled={retrying}>{retrying ? 'Looking up…' : 'Fix metadata'}</button>
       </div>
+      {#if retryError}<p class="err">{retryError}</p>{/if}
     </div>
   </header>
   <table>
@@ -70,6 +84,7 @@
   h2 { margin: 0 0 4px; font-size: 24px; }
   .artist { margin: 0; font-size: 16px; color: var(--accent); }
   .meta { margin: 4px 0 12px; color: var(--muted); }
+  .err { margin: 8px 0 0; color: #e5484d; font-size: 13px; }
   .actions { display: flex; gap: 8px; }
   table { width: 100%; border-collapse: collapse; }
   td { padding: 7px 8px; border-bottom: 1px solid var(--border); }

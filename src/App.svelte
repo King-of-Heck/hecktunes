@@ -27,8 +27,6 @@
       .filter((j): j is JobUpdate & ({ state: 'needs_choice' } | { state: 'duplicate' }) => j.state === 'needs_choice' || j.state === 'duplicate')
       .sort((a, b) => a.job_id - b.job_id)[0] ?? null,
   );
-  // Terminal states that leave the same album mounted: lets AlbumDetail reset "Fix metadata".
-  const settled = $derived(jobList.filter((j) => j.state === 'failed' || j.state === 'skipped').length);
 
   async function refresh() {
     albums = await api.listAlbums();
@@ -67,7 +65,9 @@
   <Sidebar {view} needsCount={albums.filter((a) => a.needs_metadata).length} onSelect={(v) => { view = v; selectedId = null; }} />
   <main>
     {#if selected}
-      <AlbumDetail album={selected} {bust} {settled} onBack={() => (selectedId = null)} onEdit={(t) => (editing = t)} />
+      {#key selected.id}
+        <AlbumDetail album={selected} {bust} {jobs} onBack={() => (selectedId = null)} onEdit={(t) => (editing = t)} />
+      {/key}
     {:else}
       <AlbumGrid albums={visible} {bust} onOpen={(a) => (selectedId = a.id)} />
     {/if}
