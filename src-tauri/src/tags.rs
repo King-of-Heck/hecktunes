@@ -69,15 +69,21 @@ pub fn write_tags(path: &Path, t: &TrackTags, cover_jpeg: Option<&[u8]>) -> Resu
     if t.disc_total > 0 {
         tag.set_disk_total(t.disc_total);
     }
+    // Absent values are removed, so a rewrite never leaves stale data from an earlier tag behind.
+    tag.remove_key(ItemKey::Year);
+    tag.remove_key(ItemKey::RecordingDate);
     if let Some(y) = &t.year {
         tag.insert_text(ItemKey::RecordingDate, y.clone());
     }
+    tag.remove_key(ItemKey::Genre);
     if let Some(g) = &t.genre {
         tag.set_genre(g.clone());
     }
+    tag.remove_key(ItemKey::MusicBrainzReleaseId);
     if let Some(id) = &t.mb_release_id {
         tag.insert_text(ItemKey::MusicBrainzReleaseId, id.clone());
     }
+    tag.remove_key(ItemKey::MusicBrainzRecordingId);
     if let Some(id) = &t.mb_recording_id {
         tag.insert_text(ItemKey::MusicBrainzRecordingId, id.clone());
     }
@@ -185,5 +191,25 @@ mod tests {
         let p = dir.path().join("bad.flac");
         std::fs::write(&p, b"not audio").unwrap();
         assert!(read_source_track(&p).is_err());
+    }
+
+    #[test]
+    fn none_fields_are_removed_from_the_tag() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("d.wav");
+        write_wav(&p, 1);
+        write_tags(&p, &full_tags(), None).unwrap();
+        let cleared = TrackTags { year: None, genre: None, mb_release_id: None, mb_recording_id: None, ..full_tags() };
+        write_tags(&p, &cleared, None).unwrap();
+
+        let s = read_source_track(&p).unwrap();
+        assert_eq!(s.year, None);
+        assert_eq!(s.genre, None);
+        assert_eq!(s.title.as_deref(), Some("Airbag"));
+        let tf = lofty::read_from_path(&p).unwrap();
+        let tag = tf.primary_tag().unwrap();
+        for key in [ItemKey::Year, ItemKey::RecordingDate, ItemKey::MusicBrainzReleaseId, ItemKey::MusicBrainzRecordingId] {
+            assert_eq!(tag.get_string(key.clone()), None, "{key:?} cleared");
+        }
     }
 }

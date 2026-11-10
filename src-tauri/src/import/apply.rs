@@ -63,6 +63,10 @@ fn match_release_tracks(group: &AlbumGroup, r: &ReleaseCandidate) -> Vec<Option<
 fn plan_from_release(group: &AlbumGroup, r: &ReleaseCandidate) -> Vec<TrackTags> {
     let fallback = plan_from_source(group);
     let matched = match_release_tracks(group, r);
+    // The release wins, but a release without a year/genre keeps the source's own value: the copy's
+    // tags are rewritten from this plan, so anything not carried here is gone.
+    let year = r.year().or_else(|| fallback.first().and_then(|t| t.year.clone()));
+    let genre = r.genre.clone().or_else(|| fallback.first().and_then(|t| t.genre.clone()));
     group
         .tracks
         .iter()
@@ -77,8 +81,8 @@ fn plan_from_release(group: &AlbumGroup, r: &ReleaseCandidate) -> Vec<TrackTags>
                 track_total: r.tracks.iter().filter(|t| t.disc == rt.disc).count() as u32,
                 disc_no: rt.disc,
                 disc_total: r.disc_count,
-                year: r.year(),
-                genre: r.genre.clone(),
+                year: year.clone(),
+                genre: genre.clone(),
                 mb_release_id: Some(r.mbid.clone()),
                 mb_recording_id: Some(rt.recording_id.clone()).filter(|s| !s.is_empty()),
             },
@@ -86,7 +90,8 @@ fn plan_from_release(group: &AlbumGroup, r: &ReleaseCandidate) -> Vec<TrackTags>
             None => TrackTags {
                 album: r.title.clone(),
                 album_artist: r.artist.clone(),
-                year: r.year(),
+                year: year.clone(),
+                genre: genre.clone(),
                 mb_release_id: Some(r.mbid.clone()),
                 ..fallback[i].clone()
             },
@@ -295,7 +300,7 @@ mod tests {
     use super::*;
     use crate::import::scan::scan_paths;
     use crate::library::Library;
-    use crate::tags::{embedded_cover, read_source_track};
+    use crate::tags::{embedded_cover, read_source_track, write_tags};
     use crate::test_support::{candidate, png_bytes, tagged_wav, write_wav};
     use std::fs;
 
@@ -530,5 +535,40 @@ mod tests {
         let group = scan_paths(&[src.clone()]).groups.remove(0);
         assert_eq!(group.source_dir, src);
         assert_eq!(pick_cover(&group, None), Some(b"discart".to_vec()));
+    }
+
+    #[test]
+    fn source_genre_and_year_survive_a_release_without_them() {
+        let (_d, src, mut lib) = setup();
+        write_wav(&src.join("a.wav"), 1);
+        let source_tags = TrackTags {
+            title: "t".into(),
+            artist: "Band".into(),
+            album: "Alb".into(),
+            album_artist: "Band".into(),
+            track_no: 1,
+            track_total: 1,
+            disc_no: 1,
+            disc_total: 1,
+            year: Some("1990".into()),
+            genre: Some("jazz".into()),
+            mb_release_id: None,
+            mb_recording_id: None,
+        };
+        write_tags(&src.join("a.wav"), &source_tags, None).unwrap();
+        let group = scan_paths(&[src.clone()]).groups.remove(0);
+        let mut rel = candidate("m", "Alb", "Band", &[("One", 1000)]);
+        rel.genre = None;
+        rel.date = None;
+
+        let tags = plan_tags(&group, Some(&rel));
+        assert_eq!(tags[0].genre.as_deref(), Some("jazz"));
+        assert_eq!(tags[0].year.as_deref(), Some("1990"));
+
+        let id = apply(&mut lib, &group, Some(&rel), None, false).unwrap();
+        let copy = read_source_track(&lib.album_tracks(id).unwrap()[0].file_path).unwrap();
+        assert_eq!(copy.genre.as_deref(), Some("jazz"));
+        assert_eq!(copy.year.as_deref(), Some("1990"));
+        assert_eq!(lib.album(id).unwrap().unwrap().genre.as_deref(), Some("jazz"));
     }
 }
