@@ -131,11 +131,19 @@ impl Worker {
     }
 
     fn reimport(&mut self, album_id: i64) {
-        let album = match self.lib.lock().unwrap().album(album_id) {
-            Ok(Some(a)) => a,
-            _ => return,
-        };
+        let looked_up = self.lib.lock().unwrap().album(album_id);
         let id = self.new_id();
+        let album = match looked_up {
+            Ok(Some(a)) => a,
+            Ok(None) => {
+                self.emit(id, &format!("album {album_id}"), JobState::Failed { error: format!("album {album_id} not found") });
+                return;
+            }
+            Err(e) => {
+                self.emit(id, &format!("album {album_id}"), JobState::Failed { error: format!("{e:#}") });
+                return;
+            }
+        };
         let label = format!("{} – {}", album.album_artist, album.title);
         let mut scan = scan_paths(&[album.folder_path.clone()]);
         if scan.groups.len() != 1 {
@@ -155,22 +163,25 @@ impl Worker {
                 self.emit(job.id, &job.label, JobState::NeedsChoice { candidates });
                 self.pending.insert(job.id, job);
             }
-            // Network errors land here too: import with what we have and flag it.
+            // A user-requested re-identify must say why it failed rather than look like "nothing found".
+            Err(e) if job.replace_album_id.is_some() => {
+                self.emit(job.id, &job.label, JobState::Failed { error: format!("{e:#}") })
+            }
+            // Network errors on a normal import: import with what we have and flag it.
             Ok(Identification::NotFound) | Err(_) => self.finish_unmatched(job, true),
         }
     }
 
     fn proceed(&mut self, mut job: Job, release: ReleaseCandidate) {
-        if job.replace_album_id.is_none() {
-            let existing = self.lib.lock().unwrap().find_album_by_release(&release.mbid).ok().flatten();
-            if let Some(existing_album_id) = existing {
-                job.chosen = Some(release.clone());
-                self.emit(job.id, &job.label, JobState::Duplicate { release, existing_album_id });
-                self.pending.insert(job.id, job);
-                return;
-            }
+        let existing = self.lib.lock().unwrap().find_album_by_release(&release.mbid).ok().flatten();
+        // During re-identify the album being fixed may legitimately already hold this release.
+        if let Some(existing_album_id) = existing.filter(|e| Some(*e) != job.replace_album_id) {
+            job.chosen = Some(release.clone());
+            self.emit(job.id, &job.label, JobState::Duplicate { release, existing_album_id });
+            self.pending.insert(job.id, job);
+            return;
         }
-        let replace = job.replace_album_id;
+        let replace: Vec<i64> = job.replace_album_id.into_iter().collect();
         self.finalize(job, Some(release), replace);
     }
 
@@ -189,24 +200,19 @@ impl Worker {
         }
     }
 
-    fn finalize(&mut self, job: Job, release: Option<ReleaseCandidate>, replace: Option<i64>) {
+    /// Applies the album, then removes the albums in `replace`. Once the new album is committed the
+    /// job counts as done: removing the old albums and tidying the folder name are best-effort.
+    fn finalize(&mut self, job: Job, release: Option<ReleaseCandidate>, replace: Vec<i64>) {
         self.emit(job.id, &job.label, JobState::Importing);
         let online = release.as_ref().and_then(|r| self.source.cover(&r.mbid).ok().flatten());
         let cover = pick_cover(&job.group, online);
         let mut lib = self.lib.lock().unwrap();
-        let result = apply(&mut lib, &job.group, release.as_ref(), cover, false).and_then(|album_id| {
-            if let Some(old) = replace {
-                lib.delete_album(old, true)?;
-                // The new copy may have landed in "<Album> [2]" because the old folder existed; tidy it.
-                if let Some(row) = lib.album(album_id)? {
-                    let wanted = paths::album_dir(&row.album_artist, &row.title, row.year.as_deref());
-                    if row.folder_path != lib.root().join(&wanted) && !lib.root().join(&wanted).exists() {
-                        lib.move_album_folder(album_id, &wanted)?;
-                    }
-                }
+        let result = apply(&mut lib, &job.group, release.as_ref(), cover, false);
+        if let (Ok(album_id), false) = (&result, replace.is_empty()) {
+            if let Err(e) = replace_cleanup(&mut lib, *album_id, &replace) {
+                eprintln!("import job {}: cleanup after replace failed: {}", job.id, ascii(&format!("{e:#}")));
             }
-            Ok(album_id)
-        });
+        }
         drop(lib);
         match result {
             Ok(album_id) => self.emit(job.id, &job.label, JobState::Done { album_id, matched: release.is_some() }),
@@ -218,11 +224,16 @@ impl Worker {
         let Some(mut job) = self.pending.remove(&job_id) else { return };
         match choice {
             JobChoice::Skip => self.emit(job.id, &job.label, JobState::Skipped),
+            // On a duplicate prompt, keeping the existing album means leaving the library alone.
+            JobChoice::KeepExisting if job.chosen.is_some() => self.emit(job.id, &job.label, JobState::Skipped),
             JobChoice::KeepExisting => self.finish_unmatched(job, false),
             JobChoice::Replace => {
                 let release = job.chosen.take();
                 let existing = release.as_ref().and_then(|r| self.lib.lock().unwrap().find_album_by_release(&r.mbid).ok().flatten());
-                self.finalize(job, release, existing);
+                // A re-identified album is superseded too: the new copy is made from its files.
+                let mut replace: Vec<i64> = existing.into_iter().chain(job.replace_album_id).collect();
+                replace.dedup();
+                self.finalize(job, release, replace);
             }
             JobChoice::Pick { mbid } => {
                 let found = job.candidates.iter().find(|c| c.mbid == mbid).cloned();
@@ -232,7 +243,13 @@ impl Worker {
                 }
             }
             JobChoice::Search { query } => {
-                let ids = self.source.search_text(&query).unwrap_or_default();
+                let ids = match self.source.search_text(&query) {
+                    Ok(ids) => ids,
+                    Err(e) => {
+                        self.emit(job.id, &job.label, JobState::Failed { error: format!("{e:#}") });
+                        return;
+                    }
+                };
                 let found: Vec<ReleaseCandidate> = ids
                     .iter()
                     .take(crate::identify::MAX_CANDIDATES)
@@ -244,6 +261,35 @@ impl Worker {
             }
         }
     }
+}
+
+/// Removes the superseded albums (with their files) and moves the new album out of a
+/// "<Album> [2]"-style folder if the plain name is now free. Tries every step; returns the first error.
+fn replace_cleanup(lib: &mut Library, album_id: i64, old: &[i64]) -> anyhow::Result<()> {
+    let mut first_err = None;
+    for &id in old.iter().filter(|&&id| id != album_id) {
+        if let Err(e) = lib.delete_album(id, true) {
+            first_err.get_or_insert(e);
+        }
+    }
+    let tidy = (|| -> anyhow::Result<()> {
+        if let Some(row) = lib.album(album_id)? {
+            let wanted = paths::album_dir(&row.album_artist, &row.title, row.year.as_deref());
+            if row.folder_path != lib.root().join(&wanted) && !lib.root().join(&wanted).exists() {
+                lib.move_album_folder(album_id, &wanted)?;
+            }
+        }
+        Ok(())
+    })();
+    if let Err(e) = tidy {
+        first_err.get_or_insert(e);
+    }
+    first_err.map_or(Ok(()), Err)
+}
+
+/// Console is not UTF-8 everywhere; keep log lines ASCII.
+fn ascii(s: &str) -> String {
+    s.chars().map(|c| if c.is_ascii() { c } else { '?' }).collect()
 }
 
 #[cfg(test)]
@@ -397,6 +443,220 @@ mod tests {
         let ups = until(&h.rx, is_terminal);
         assert!(matches!(ups.last().unwrap().state, JobState::Failed { .. }));
         assert_eq!(ups.last().unwrap().label, "x.wma");
+    }
+
+    /// FakeSource whose network calls can be made to fail.
+    struct FlakySource {
+        inner: FakeSource,
+        fail_search: bool,
+        fail_search_text: bool,
+    }
+
+    impl MetadataSource for FlakySource {
+        fn search(&self, album: &str, artist: &str, n: usize) -> anyhow::Result<Vec<String>> {
+            if self.fail_search {
+                anyhow::bail!("network down");
+            }
+            self.inner.search(album, artist, n)
+        }
+        fn search_text(&self, query: &str) -> anyhow::Result<Vec<String>> {
+            if self.fail_search_text {
+                anyhow::bail!("search service unavailable");
+            }
+            self.inner.search_text(query)
+        }
+        fn by_fingerprint(&self, t: &crate::model::SourceTrack) -> anyhow::Result<Vec<String>> {
+            self.inner.by_fingerprint(t)
+        }
+        fn release(&self, mbid: &str) -> anyhow::Result<ReleaseCandidate> {
+            self.inner.release(mbid)
+        }
+        fn cover(&self, mbid: &str) -> anyhow::Result<Option<Vec<u8>>> {
+            self.inner.cover(mbid)
+        }
+    }
+
+    fn start_queue(lib: Arc<Mutex<Library>>, source: impl MetadataSource + 'static) -> (ImportQueue, Receiver<JobUpdate>) {
+        let (tx, rx) = channel();
+        let q = ImportQueue::start(lib, Arc::new(source), move |u| {
+            let _ = tx.send(u);
+        });
+        (q, rx)
+    }
+
+    fn fake(ids: &[&str], releases: Vec<ReleaseCandidate>) -> FakeSource {
+        FakeSource { releases, search_ids: ids.iter().map(|s| s.to_string()).collect() }
+    }
+
+    /// Imports the harness album with no match, so it lands as needs_metadata. Returns its id.
+    fn import_unmatched(h: &Harness) -> i64 {
+        h.queue.send(Command::Import(vec![h.src.clone()]));
+        let ups = until(&h.rx, is_terminal);
+        match ups.last().unwrap().state {
+            JobState::Done { album_id, matched: false } => album_id,
+            ref other => panic!("expected unmatched Done, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn reimport_onto_release_owned_by_another_album_asks_duplicate() {
+        let h = harness(fake(&[], vec![]));
+        let x = import_unmatched(&h);
+        // Album Y already holds release m1 (imported from a second folder).
+        let other = h.src.parent().unwrap().join("Other Src");
+        std::fs::create_dir(&other).unwrap();
+        tagged_wav(&other.join("1.wav"), 1, "One", "Album", "Band", 1);
+        tagged_wav(&other.join("2.wav"), 2, "Two", "Album", "Band", 2);
+        let (q2, rx2) = start_queue(h.lib.clone(), fake(&["m1"], vec![candidate("m1", "Album", "Band", &TL)]));
+        q2.send(Command::Import(vec![other]));
+        let y = match until(&rx2, is_terminal).last().unwrap().state {
+            JobState::Done { album_id, matched: true } => album_id,
+            ref other => panic!("expected matched Done, got {other:?}"),
+        };
+
+        q2.send(Command::Reimport { album_id: x });
+        let ups = until(&rx2, |s| matches!(s, JobState::Duplicate { .. }) || is_terminal(s));
+        let last = ups.last().unwrap();
+        assert!(
+            matches!(last.state, JobState::Duplicate { existing_album_id, .. } if existing_album_id == y),
+            "expected Duplicate of {y}, got {:?}",
+            last.state
+        );
+
+        // Replace: the re-identified copy supersedes both Y and the old X.
+        q2.send(Command::Resolve { job_id: last.job_id, choice: JobChoice::Replace });
+        let ups = until(&rx2, is_terminal);
+        assert!(matches!(ups.last().unwrap().state, JobState::Done { matched: true, .. }), "{:?}", ups.last());
+        let albums = h.lib.lock().unwrap().list_albums().unwrap();
+        assert_eq!(albums.len(), 1, "{albums:?}");
+        assert_eq!(albums[0].mb_release_id.as_deref(), Some("m1"));
+        assert!(albums[0].id != x && albums[0].id != y);
+    }
+
+    #[test]
+    fn keep_existing_on_duplicate_is_treated_as_skip() {
+        let h = harness(fake(&["m1"], vec![candidate("m1", "Album", "Band", &TL)]));
+        h.queue.send(Command::Import(vec![h.src.clone()]));
+        until(&h.rx, is_terminal);
+        h.queue.send(Command::Import(vec![h.src.clone()]));
+        let ups = until(&h.rx, |s| matches!(s, JobState::Duplicate { .. }) || is_terminal(s));
+        assert!(matches!(ups.last().unwrap().state, JobState::Duplicate { .. }));
+        h.queue.send(Command::Resolve { job_id: ups.last().unwrap().job_id, choice: JobChoice::KeepExisting });
+        let ups = until(&h.rx, is_terminal);
+        assert!(matches!(ups.last().unwrap().state, JobState::Skipped), "{:?}", ups.last());
+        assert_eq!(h.lib.lock().unwrap().list_albums().unwrap().len(), 1);
+    }
+
+    /// Holds a file open so its folder cannot be removed while the guard lives.
+    struct FolderLock {
+        #[cfg(windows)]
+        _file: std::fs::File,
+        #[cfg(unix)]
+        dir: PathBuf,
+    }
+
+    fn lock_folder(dir: &std::path::Path) -> FolderLock {
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            const FILE_SHARE_READ: u32 = 1;
+            let file = std::fs::read_dir(dir).unwrap().filter_map(|e| e.ok()).find(|e| e.path().is_file()).unwrap().path();
+            // Readers may still open it (so it can be copied), but nobody may delete it.
+            let f = std::fs::OpenOptions::new().read(true).share_mode(FILE_SHARE_READ).open(file).unwrap();
+            FolderLock { _file: f }
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+            FolderLock { dir: dir.to_path_buf() }
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for FolderLock {
+        fn drop(&mut self) {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&self.dir, std::fs::Permissions::from_mode(0o755));
+        }
+    }
+
+    #[test]
+    fn reimport_reports_done_even_if_old_album_cleanup_fails() {
+        let h = harness(fake(&[], vec![]));
+        let x = import_unmatched(&h);
+        let old_folder = h.lib.lock().unwrap().album(x).unwrap().unwrap().folder_path;
+        let guard = lock_folder(&old_folder);
+
+        let (q2, rx2) = start_queue(h.lib.clone(), fake(&["m9"], vec![candidate("m9", "Album", "Band", &TL)]));
+        q2.send(Command::Reimport { album_id: x });
+        let ups = until(&rx2, is_terminal);
+        drop(guard);
+        let new_id = match ups.last().unwrap().state {
+            JobState::Done { album_id, matched: true } => album_id,
+            ref other => panic!("expected matched Done despite cleanup failure, got {other:?}"),
+        };
+        let lib = h.lib.lock().unwrap();
+        let new_album = lib.album(new_id).unwrap().expect("new album committed");
+        assert_eq!(new_album.mb_release_id.as_deref(), Some("m9"));
+        assert!(new_album.folder_path.exists());
+    }
+
+    #[test]
+    fn reimport_with_lookup_error_reports_failed() {
+        let h = harness(FakeSource { releases: vec![], search_ids: vec![] });
+        let x = import_unmatched(&h);
+        let (q2, rx2) = start_queue(
+            h.lib.clone(),
+            FlakySource { inner: fake(&[], vec![]), fail_search: true, fail_search_text: false },
+        );
+        q2.send(Command::Reimport { album_id: x });
+        let ups = until(&rx2, is_terminal);
+        match &ups.last().unwrap().state {
+            JobState::Failed { error } => assert!(error.contains("network down"), "{error}"),
+            other => panic!("expected Failed, got {other:?}"),
+        }
+        assert_eq!(h.lib.lock().unwrap().list_albums().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn import_with_lookup_error_still_imports_with_needs_metadata() {
+        let h = harness(FakeSource { releases: vec![], search_ids: vec![] });
+        let (q2, rx2) = start_queue(
+            h.lib.clone(),
+            FlakySource { inner: fake(&[], vec![]), fail_search: true, fail_search_text: false },
+        );
+        q2.send(Command::Import(vec![h.src.clone()]));
+        let ups = until(&rx2, is_terminal);
+        assert!(matches!(ups.last().unwrap().state, JobState::Done { matched: false, .. }));
+        assert!(h.lib.lock().unwrap().list_albums().unwrap()[0].needs_metadata);
+    }
+
+    #[test]
+    fn search_choice_with_lookup_error_reports_failed() {
+        let releases = vec![candidate("a", "Album", "Band", &TL), candidate("b", "Album (Live)", "Band", &TL)];
+        let h = harness(FakeSource { releases: vec![], search_ids: vec![] });
+        let (q2, rx2) = start_queue(
+            h.lib.clone(),
+            FlakySource { inner: fake(&["a", "b"], releases), fail_search: false, fail_search_text: true },
+        );
+        q2.send(Command::Import(vec![h.src.clone()]));
+        let ups = until(&rx2, |s| matches!(s, JobState::NeedsChoice { .. }) || is_terminal(s));
+        assert!(matches!(ups.last().unwrap().state, JobState::NeedsChoice { .. }));
+        q2.send(Command::Resolve { job_id: ups.last().unwrap().job_id, choice: JobChoice::Search { query: "x".into() } });
+        let ups = until(&rx2, |s| matches!(s, JobState::NeedsChoice { .. }) || is_terminal(s));
+        match &ups.last().unwrap().state {
+            JobState::Failed { error } => assert!(error.contains("search service unavailable"), "{error}"),
+            other => panic!("expected Failed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn reimport_of_missing_album_reports_failed() {
+        let h = harness(FakeSource { releases: vec![], search_ids: vec![] });
+        h.queue.send(Command::Reimport { album_id: 999 });
+        let ups = until(&h.rx, is_terminal);
+        assert!(matches!(ups.last().unwrap().state, JobState::Failed { .. }), "{:?}", ups.last());
     }
 
     #[test]
