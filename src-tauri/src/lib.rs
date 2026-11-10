@@ -1,5 +1,6 @@
 pub mod library;
 pub mod model;
+pub mod tags;
 #[cfg(test)]
 mod test_support;
 

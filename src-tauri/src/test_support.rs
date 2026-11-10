@@ -17,6 +17,33 @@ pub fn write_wav(path: &Path, secs: u32) {
     w.finalize().unwrap();
 }
 
+use crate::model::TrackTags;
+
+/// WAV with album/artist/title/track tags written via tags::write_tags.
+#[allow(dead_code)] // used by later tasks (import/library tests)
+pub fn tagged_wav(path: &Path, secs: u32, title: &str, album: &str, artist: &str, track: u32) {
+    write_wav(path, secs);
+    crate::tags::write_tags(
+        path,
+        &TrackTags {
+            title: title.into(),
+            artist: artist.into(),
+            album: album.into(),
+            album_artist: artist.into(),
+            track_no: track,
+            track_total: 0,
+            disc_no: 1,
+            disc_total: 0,
+            year: None,
+            genre: None,
+            mb_release_id: None,
+            mb_recording_id: None,
+        },
+        None,
+    )
+    .unwrap();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
