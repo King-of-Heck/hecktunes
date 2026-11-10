@@ -1,3 +1,4 @@
+pub mod library;
 pub mod model;
 #[cfg(test)]
 mod test_support;
