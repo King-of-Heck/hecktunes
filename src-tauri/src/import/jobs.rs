@@ -1,6 +1,6 @@
 use crate::identify::{identify, rank, Identification, MetadataSource};
 use crate::import::apply::{pick_cover, stage};
-use crate::import::scan::{scan_paths, AlbumGroup};
+use crate::import::scan::{scan_paths, scan_paths_excluding, AlbumGroup};
 use crate::library::{paths, Library};
 use crate::model::ReleaseCandidate;
 use serde::{Deserialize, Serialize};
@@ -121,7 +121,7 @@ impl Worker {
     }
 
     fn import(&mut self, paths: Vec<PathBuf>) {
-        let scan = scan_paths(&paths);
+        let scan = scan_paths_excluding(&paths, &self.root);
         for (path, reason) in scan.skipped {
             let id = self.new_id();
             let label = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
@@ -695,5 +695,19 @@ mod tests {
         assert_eq!(v, serde_json::json!({"job_id": 3, "label": "L", "state": "done", "album_id": 7, "matched": true}));
         let c: JobChoice = serde_json::from_value(serde_json::json!({"kind": "pick", "mbid": "x"})).unwrap();
         assert!(matches!(c, JobChoice::Pick { mbid } if mbid == "x"));
+    }
+
+    #[test]
+    fn dropping_a_library_folder_does_not_reimport_it() {
+        let h = harness(fake(&[], vec![]));
+        let x = import_unmatched(&h);
+        let folder = h.lib.lock().unwrap().album(x).unwrap().unwrap().folder_path;
+        h.queue.send(Command::Import(vec![folder]));
+        let ups = until(&h.rx, is_terminal);
+        match &ups.last().unwrap().state {
+            JobState::Failed { error } => assert!(error.contains("library"), "{error}"),
+            other => panic!("expected Failed, got {other:?}"),
+        }
+        assert_eq!(h.lib.lock().unwrap().list_albums().unwrap().len(), 1);
     }
 }

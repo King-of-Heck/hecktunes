@@ -28,19 +28,38 @@ pub struct ScanResult {
     pub skipped: Vec<(PathBuf, String)>,
 }
 
-fn collect_files(path: &Path, out: &mut Vec<PathBuf>) {
+/// Canonical form for "is this inside that" checks (resolves case, `..` and links on Windows).
+fn canonical(p: &Path) -> PathBuf {
+    fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf())
+}
+
+fn is_under(path: &Path, exclude: Option<&Path>) -> bool {
+    exclude.is_some_and(|ex| canonical(path).starts_with(ex))
+}
+
+/// Collects files under `path`, skipping hidden entries and any folder inside `exclude`
+/// (which must be canonical); such folders are pushed to `excluded`.
+fn collect_files(path: &Path, exclude: Option<&Path>, out: &mut Vec<PathBuf>, excluded: &mut Vec<PathBuf>) {
     if path.is_dir() {
+        if is_under(path, exclude) {
+            excluded.push(path.to_path_buf());
+            return;
+        }
         let Ok(entries) = fs::read_dir(path) else { return };
         let mut children: Vec<PathBuf> = entries.flatten().map(|e| e.path()).collect();
         children.sort();
         for child in children {
             let hidden = child.file_name().map(|n| n.to_string_lossy().starts_with('.')).unwrap_or(false);
             if !hidden {
-                collect_files(&child, out);
+                collect_files(&child, exclude, out, excluded);
             }
         }
     } else if path.is_file() {
-        out.push(path.to_path_buf());
+        if is_under(path, exclude) {
+            excluded.push(path.to_path_buf());
+        } else {
+            out.push(path.to_path_buf());
+        }
     }
 }
 
@@ -56,11 +75,18 @@ fn disc_folder_number(dir: &Path) -> Option<u32> {
 }
 
 pub fn scan_paths(paths: &[PathBuf]) -> ScanResult {
-    let mut files = Vec::new();
+    scan(paths, None)
+}
+
+fn scan(paths: &[PathBuf], exclude: Option<&Path>) -> ScanResult {
+    let (mut files, mut excluded) = (Vec::new(), Vec::new());
     for p in paths {
-        collect_files(p, &mut files);
+        collect_files(p, exclude, &mut files, &mut excluded);
     }
     let mut result = ScanResult::default();
+    for p in excluded {
+        result.skipped.push((p, "already in the HeckTunes library; not imported again".to_string()));
+    }
     // Key: (folder, lowercased album tag) - keeps two albums dumped in one folder apart.
     let mut groups: BTreeMap<(PathBuf, String), Vec<SourceTrack>> = BTreeMap::new();
     for f in files {
@@ -97,6 +123,12 @@ pub fn scan_paths(paths: &[PathBuf]) -> ScanResult {
         result.groups.push(AlbumGroup { tracks, source_dir: dir });
     }
     result
+}
+
+/// Like `scan_paths`, but never descends into `library_root` (so the library can't be imported
+/// into itself). Dropped paths at or under the root are reported as skipped.
+pub fn scan_paths_excluding(paths: &[PathBuf], library_root: &Path) -> ScanResult {
+    scan(paths, Some(&canonical(library_root)))
 }
 
 #[cfg(test)]
@@ -196,5 +228,29 @@ mod tests {
         tagged_wav(&cd2.join("a.wav"), 1, "t", "Alb", "Band", 1); // disc tag 1
         let r = scan_paths(&[cd2]);
         assert_eq!(r.groups[0].tracks[0].disc_no, Some(1));
+    }
+
+    #[test]
+    fn paths_inside_the_library_root_are_not_scanned() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("lib");
+        let in_lib = root.join("Band").join("Alb");
+        let outside = dir.path().join("src");
+        fs::create_dir_all(&in_lib).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        write_wav(&in_lib.join("01 a.wav"), 1);
+        write_wav(&outside.join("b.wav"), 1);
+
+        // Dropping a library folder (or the root itself) directly is skipped with a reason.
+        let r = scan_paths_excluding(&[in_lib.clone(), root.clone(), outside.clone()], &root);
+        assert_eq!(r.groups.len(), 1);
+        assert_eq!(r.groups[0].source_dir, outside);
+        assert_eq!(r.skipped.len(), 2, "{:?}", r.skipped);
+        assert!(r.skipped.iter().all(|(_, why)| why.contains("library")));
+
+        // Dropping a parent of the root: the root's contents are left out.
+        let r = scan_paths_excluding(&[dir.path().to_path_buf()], &root);
+        assert_eq!(r.groups.len(), 1);
+        assert_eq!(r.groups[0].source_dir, outside);
     }
 }
