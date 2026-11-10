@@ -29,10 +29,12 @@ pub fn run() {
             let data_dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&data_dir)?;
             let lib = Arc::new(Mutex::new(Library::open(&data_dir.join("library.db"), root)?));
-            // Settings file wins; HECKTUNES_ACOUSTID_KEY env var is the fallback.
-            let key = settings
-                .acoustid_key
-                .or_else(|| std::env::var("HECKTUNES_ACOUSTID_KEY").ok().filter(|k| !k.is_empty()));
+            // Settings file, then runtime env var, then the key baked in at build time.
+            let key = settings::resolve_acoustid_key(
+                settings.acoustid_key,
+                std::env::var("HECKTUNES_ACOUSTID_KEY").ok(),
+                option_env!("HECKTUNES_ACOUSTID_KEY"),
+            );
             let source: Arc<dyn MetadataSource> = Arc::new(OnlineSource::new(key));
             let handle = app.handle().clone();
             let queue = ImportQueue::start(lib.clone(), source, move |update| {

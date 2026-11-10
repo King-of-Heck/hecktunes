@@ -15,9 +15,41 @@ pub fn load(config_dir: &Path) -> Settings {
         .unwrap_or_default()
 }
 
+/// Picks the AcoustID key: settings.json, then runtime env var, then the
+/// compile-time baked key. Blank/whitespace values count as missing.
+pub fn resolve_acoustid_key(
+    settings: Option<String>,
+    runtime: Option<String>,
+    baked: Option<&str>,
+) -> Option<String> {
+    let usable = |k: &str| !k.trim().is_empty();
+    settings
+        .filter(|k| usable(k))
+        .or_else(|| runtime.filter(|k| usable(k)))
+        .or_else(|| baked.filter(|k| usable(k)).map(str::to_string))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn acoustid_key_precedence_is_settings_then_runtime_then_baked() {
+        let s = |v: &str| Some(v.to_string());
+        assert_eq!(resolve_acoustid_key(s("a"), s("b"), Some("c")), s("a"));
+        assert_eq!(resolve_acoustid_key(None, s("b"), Some("c")), s("b"));
+        assert_eq!(resolve_acoustid_key(None, None, Some("c")), s("c"));
+        assert_eq!(resolve_acoustid_key(None, None, None), None);
+    }
+
+    #[test]
+    fn acoustid_key_blank_values_count_as_missing() {
+        let s = |v: &str| Some(v.to_string());
+        assert_eq!(resolve_acoustid_key(s(""), s("b"), Some("c")), s("b"));
+        assert_eq!(resolve_acoustid_key(s("  "), s(" \t"), Some("c")), s("c"));
+        assert_eq!(resolve_acoustid_key(None, s(""), Some("")), None);
+        assert_eq!(resolve_acoustid_key(s("\n"), None, Some("  ")), None);
+    }
 
     #[test]
     fn missing_file_gives_defaults_and_valid_file_parses() {
