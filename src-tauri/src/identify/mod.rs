@@ -111,13 +111,19 @@ impl MetadataSource for OnlineSource {
     }
 
     fn cover(&self, mbid: &str) -> Result<Option<Vec<u8>>> {
-        let url = format!("https://coverartarchive.org/release/{mbid}/front-500");
+        let url = cover_url(mbid);
         match self.agent.get(&url).header("User-Agent", musicbrainz::USER_AGENT).call() {
             Ok(mut resp) => Ok(Some(resp.body_mut().read_to_vec()?)),
             Err(ureq::Error::StatusCode(404)) => Ok(None),
             Err(e) => Err(e.into()),
         }
     }
+}
+
+/// Cover Art Archive front image. The 1200 px thumbnail (not 500) so `prepare_cover` can produce a
+/// full 600 px cover; it downscales anything larger.
+fn cover_url(mbid: &str) -> String {
+    format!("https://coverartarchive.org/release/{mbid}/front-1200")
 }
 
 #[cfg(test)]
@@ -249,5 +255,10 @@ mod tests {
         let r = src.release(&ids[0]).unwrap();
         assert_eq!(r.title, "OK Computer");
         assert!(src.cover(&r.mbid).is_ok());
+    }
+
+    #[test]
+    fn cover_url_asks_for_an_image_at_least_600_px() {
+        assert_eq!(cover_url("abc"), "https://coverartarchive.org/release/abc/front-1200");
     }
 }
