@@ -79,6 +79,32 @@ pub fn candidate(mbid: &str, title: &str, artist: &str, tracks: &[(&str, u64)]) 
     }
 }
 
+use crate::identify::MetadataSource;
+use crate::model::SourceTrack;
+
+pub struct FakeSource {
+    pub releases: Vec<ReleaseCandidate>,
+    pub search_ids: Vec<String>,
+}
+
+impl MetadataSource for FakeSource {
+    fn search(&self, _album: &str, _artist: &str, _track_count: usize) -> anyhow::Result<Vec<String>> {
+        Ok(self.search_ids.clone())
+    }
+    fn search_text(&self, _query: &str) -> anyhow::Result<Vec<String>> {
+        Ok(self.releases.iter().map(|r| r.mbid.clone()).collect())
+    }
+    fn by_fingerprint(&self, _track: &SourceTrack) -> anyhow::Result<Vec<String>> {
+        Ok(vec![])
+    }
+    fn release(&self, mbid: &str) -> anyhow::Result<ReleaseCandidate> {
+        self.releases.iter().find(|r| r.mbid == mbid).cloned().ok_or_else(|| anyhow::anyhow!("no release {mbid}"))
+    }
+    fn cover(&self, _mbid: &str) -> anyhow::Result<Option<Vec<u8>>> {
+        Ok(Some(png_bytes(800, 800)))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

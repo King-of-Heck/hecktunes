@@ -1,0 +1,15 @@
+{
+  "status": "ok",
+  "results": [
+    {
+      "id": "aaaa-result-1",
+      "score": 0.97,
+      "recordings": [
+        { "id": "rec-1", "releases": [ { "id": "rel-A" }, { "id": "rel-B" } ] },
+        { "id": "rec-2", "releases": [ { "id": "rel-B" }, { "id": "rel-C" } ] }
+      ]
+    },
+    { "id": "aaaa-result-2", "score": 0.41, "recordings": [ { "id": "rec-3", "releases": [ { "id": "rel-D" } ] } ] },
+    { "id": "aaaa-result-3", "score": 0.30 }
+  ]
+}
