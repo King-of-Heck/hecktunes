@@ -1,0 +1,36 @@
+[package]
+name = "hecktunes"
+version = "0.1.0"
+description = "A Tauri App"
+authors = ["you"]
+license = ""
+repository = ""
+edition = "2024"
+rust-version = "1.90"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+name = "hecktunes_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2.7.4", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["protocol-asset"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+rusqlite = { version = "0.41", features = ["bundled"] }
+lofty = "0.25"
+symphonia = { version = "0.6", features = ["all-codecs", "all-formats"] }
+rusty-chromaprint = "0.3"
+ureq = { version = "3", features = ["json"] }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
+base64 = "0.23"
+strsim = "0.11"
+
+[dev-dependencies]
+hound = "3.5"
+tempfile = "3"
