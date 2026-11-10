@@ -218,10 +218,15 @@ impl Worker {
     fn finalize(&mut self, job: Job, release: Option<ReleaseCandidate>, replace: Vec<i64>) {
         self.emit(job.id, &job.label, JobState::Importing);
         let online = release.as_ref().and_then(|r| self.source.cover(&r.mbid).ok().flatten());
-        let cover = pick_cover(&job.group, online);
-        // Copy and tag without the library lock; take it only for the DB transaction and cleanup.
+        // Fresh imports copy from outside the library, so they stage without the library lock and
+        // take it only for the DB transaction and cleanup. A reimport copies the album's own library
+        // files, which update_album/update_track rewrite in place under the lock: hold the lock across
+        // stage + commit + cleanup so the copy can't be torn and the intact old folder is never
+        // deleted in favour of a torn one. Never notify while holding it.
+        let mut held = if job.replace_album_id.is_some() { Some(self.lib.lock().unwrap()) } else { None };
+        let cover = pick_cover(&job.group, online); // may read the album's own files, so after taking the lock
         let staged = stage(&self.root, &job.group, release.as_ref(), cover, false);
-        let mut lib = self.lib.lock().unwrap();
+        let mut lib = held.take().unwrap_or_else(|| self.lib.lock().unwrap());
         let result = staged.and_then(|s| s.commit(&mut lib));
         if let (Ok(album_id), false) = (&result, replace.is_empty()) {
             if let Err(e) = replace_cleanup(&mut lib, *album_id, &replace) {
@@ -489,6 +494,62 @@ mod tests {
         fn cover(&self, mbid: &str) -> anyhow::Result<Option<Vec<u8>>> {
             self.inner.cover(mbid)
         }
+    }
+
+    /// FakeSource whose `cover` call (made just before staging) signals the test and then stalls,
+    /// giving the test time to take the library lock the way a concurrent update command would.
+    struct GateSource {
+        inner: FakeSource,
+        reached: Mutex<std::sync::mpsc::Sender<()>>,
+    }
+
+    impl MetadataSource for GateSource {
+        fn search(&self, album: &str, artist: &str, n: usize) -> anyhow::Result<Vec<String>> {
+            self.inner.search(album, artist, n)
+        }
+        fn search_text(&self, query: &str) -> anyhow::Result<Vec<String>> {
+            self.inner.search_text(query)
+        }
+        fn by_fingerprint(&self, t: &crate::model::SourceTrack) -> anyhow::Result<Vec<String>> {
+            self.inner.by_fingerprint(t)
+        }
+        fn release(&self, mbid: &str) -> anyhow::Result<ReleaseCandidate> {
+            self.inner.release(mbid)
+        }
+        fn cover(&self, mbid: &str) -> anyhow::Result<Option<Vec<u8>>> {
+            let _ = self.reached.lock().unwrap().send(());
+            std::thread::sleep(Duration::from_millis(300));
+            self.inner.cover(mbid)
+        }
+    }
+
+    fn album_dir_count(root: &std::path::Path) -> usize {
+        std::fs::read_dir(root.join("Band")).map(|d| d.filter_map(|e| e.ok()).filter(|e| e.path().is_dir()).count()).unwrap_or(0)
+    }
+
+    #[test]
+    fn reimport_does_not_stage_while_the_library_is_locked() {
+        let h = harness(fake(&[], vec![]));
+        let x = import_unmatched(&h);
+        let root = h.lib.lock().unwrap().root().to_path_buf();
+        assert_eq!(album_dir_count(&root), 1);
+
+        let (tx, reached) = channel();
+        let (q2, rx2) = start_queue(
+            h.lib.clone(),
+            GateSource { inner: fake(&["m9"], vec![candidate("m9", "Album", "Band", &TL)]), reached: Mutex::new(tx) },
+        );
+        q2.reimport(x);
+        reached.recv_timeout(Duration::from_secs(10)).expect("worker reached the cover lookup");
+        // Same moment a concurrent update_album would hold the lock: the reimport must not be copying.
+        let guard = h.lib.lock().unwrap();
+        std::thread::sleep(Duration::from_millis(500));
+        assert_eq!(album_dir_count(&root), 1, "reimport staged its copy while the library lock was held elsewhere");
+        drop(guard);
+
+        let ups = until(&rx2, is_terminal);
+        assert!(matches!(ups.last().unwrap().state, JobState::Done { matched: true, .. }), "{:?}", ups.last());
+        assert_eq!(album_dir_count(&root), 1, "old folder replaced by the new one");
     }
 
     fn start_queue(lib: Arc<Mutex<Library>>, source: impl MetadataSource + 'static) -> (ImportQueue, Receiver<JobUpdate>) {

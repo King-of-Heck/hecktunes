@@ -119,11 +119,16 @@ fn plan_from_source(group: &AlbumGroup) -> Vec<TrackTags> {
     let genre = tracks.iter().find_map(|t| t.genre.clone());
     let discs: Vec<u32> = tracks.iter().map(|t| t.disc_no.unwrap_or(1)).collect();
     let disc_total = discs.iter().copied().max().unwrap_or(1);
+    // Position within the track's own disc (1-based, scan order), for files without a track tag.
+    let mut seen_per_disc: std::collections::HashMap<u32, u32> = std::collections::HashMap::new();
     tracks
         .iter()
         .enumerate()
         .map(|(i, t)| {
             let disc = discs[i];
+            let in_disc = seen_per_disc.entry(disc).or_insert(0);
+            *in_disc += 1;
+            let in_disc = *in_disc;
             TrackTags {
                 title: non_blank(&t.title).unwrap_or_else(|| {
                     t.path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default()
@@ -131,7 +136,7 @@ fn plan_from_source(group: &AlbumGroup) -> Vec<TrackTags> {
                 artist: non_blank(&t.artist).unwrap_or_else(|| album_artist.clone()),
                 album: album.clone(),
                 album_artist: album_artist.clone(),
-                track_no: t.track_no.unwrap_or(i as u32 + 1),
+                track_no: t.track_no.unwrap_or(in_disc),
                 track_total: discs.iter().filter(|d| **d == disc).count() as u32,
                 disc_no: disc,
                 disc_total,
@@ -197,6 +202,15 @@ fn copy_writable(src: &Path, dest: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Removes a staged album folder, then its artist folder if that is now empty (`remove_dir` fails on a
+/// non-empty folder, which is what we want; errors are ignored).
+fn remove_staged_dir(abs_dir: &Path) {
+    let _ = fs::remove_dir_all(abs_dir);
+    if let Some(parent) = abs_dir.parent() {
+        let _ = fs::remove_dir(parent);
+    }
+}
+
 /// An album copied and tagged into its own new library folder, not yet in the database.
 #[must_use = "commit or discard the staged album"]
 pub struct Staged {
@@ -218,7 +232,7 @@ impl Staged {
     }
 
     pub fn discard(self) {
-        let _ = fs::remove_dir_all(&self.abs_dir);
+        remove_staged_dir(&self.abs_dir);
     }
 }
 
@@ -278,7 +292,7 @@ pub fn stage(
         Ok(Staged { abs_dir: abs_dir.clone(), album, tracks })
     })();
     if result.is_err() {
-        let _ = fs::remove_dir_all(&abs_dir);
+        remove_staged_dir(&abs_dir);
     }
     result
 }
@@ -460,6 +474,39 @@ mod tests {
         let row = lib.album(id).unwrap().unwrap();
         assert_eq!(row.track_count, 1);
         assert!(row.folder_path.ends_with("src"));
+    }
+
+    #[test]
+    fn untagged_track_numbers_restart_on_each_disc() {
+        let (_d, src, mut lib) = setup();
+        let album = src.join("Album");
+        for (disc, n) in [("CD1", 2), ("CD2", 3)] {
+            fs::create_dir_all(album.join(disc)).unwrap();
+            for i in 1..=n {
+                write_wav(&album.join(disc).join(format!("t{i}.wav")), 1);
+            }
+        }
+        let group = scan_paths(&[album]).groups.remove(0);
+        assert_eq!(group.tracks.len(), 5);
+        let numbers: Vec<(u32, u32)> = plan_from_source(&group).iter().map(|t| (t.disc_no, t.track_no)).collect();
+        assert_eq!(numbers, vec![(1, 1), (1, 2), (2, 1), (2, 2), (2, 3)]);
+        let id = apply(&mut lib, &group, None, None, true).unwrap();
+        let tracks = lib.album_tracks(id).unwrap();
+        assert_eq!(tracks.iter().map(|t| (t.disc, t.number)).collect::<Vec<_>>(), numbers);
+    }
+
+    #[test]
+    fn discarded_stage_removes_empty_artist_folder_but_keeps_a_used_one() {
+        let (_d, src, lib) = setup();
+        write_wav(&src.join("a.wav"), 1);
+        let group = scan_paths(&[src.clone()]).groups.remove(0);
+        let root = lib.root().to_path_buf();
+        stage(&root, &group, None, None, true).unwrap().discard();
+        assert!(!root.join("Unknown Artist").exists());
+        let keep = stage(&root, &group, None, None, true).unwrap();
+        stage(&root, &group, None, None, true).unwrap().discard();
+        assert!(root.join("Unknown Artist").exists(), "artist folder still holds another album");
+        keep.discard();
     }
 
     fn set_readonly(p: &std::path::Path, ro: bool) {
