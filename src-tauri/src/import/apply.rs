@@ -50,12 +50,16 @@ fn plan_from_release(group: &AlbumGroup, r: &ReleaseCandidate) -> Vec<TrackTags>
         .collect()
 }
 
+fn non_blank(s: &Option<String>) -> Option<String> {
+    s.as_ref().map(|v| v.trim()).filter(|v| !v.is_empty()).map(str::to_string)
+}
+
 fn plan_from_source(group: &AlbumGroup) -> Vec<TrackTags> {
     let tracks = &group.tracks;
     let folder_name = group.source_dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-    let album = tracks.iter().find_map(|t| t.album.clone()).unwrap_or(folder_name);
-    let artists: Vec<&String> = tracks.iter().filter_map(|t| t.artist.as_ref()).collect();
-    let album_artist = tracks.iter().find_map(|t| t.album_artist.clone()).unwrap_or_else(|| {
+    let album = tracks.iter().find_map(|t| non_blank(&t.album)).unwrap_or(folder_name);
+    let artists: Vec<&String> = tracks.iter().filter_map(|t| t.artist.as_ref().filter(|a| !a.trim().is_empty())).collect();
+    let album_artist = tracks.iter().find_map(|t| non_blank(&t.album_artist)).unwrap_or_else(|| {
         match artists.first() {
             None => UNKNOWN_ARTIST.to_string(),
             Some(first) if artists.iter().all(|a| a == first) => (*first).clone(),
@@ -72,10 +76,10 @@ fn plan_from_source(group: &AlbumGroup) -> Vec<TrackTags> {
         .map(|(i, t)| {
             let disc = discs[i];
             TrackTags {
-                title: t.title.clone().unwrap_or_else(|| {
+                title: non_blank(&t.title).unwrap_or_else(|| {
                     t.path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default()
                 }),
-                artist: t.artist.clone().unwrap_or_else(|| album_artist.clone()),
+                artist: non_blank(&t.artist).unwrap_or_else(|| album_artist.clone()),
                 album: album.clone(),
                 album_artist: album_artist.clone(),
                 track_no: t.track_no.unwrap_or(i as u32 + 1),
@@ -106,6 +110,20 @@ fn unique_dir(root: &Path, rel: PathBuf) -> PathBuf {
     (2..).map(|n| parent.join(format!("{name} [{n}]"))).find(|p| !root.join(p).exists()).expect("unbounded range")
 }
 
+/// Disambiguate a destination file name already used in this album: "x.wav" -> "x (2).wav".
+fn unique_name(used: &mut std::collections::HashSet<String>, name: String) -> String {
+    let key = |s: &str| s.to_lowercase();
+    if used.insert(key(&name)) {
+        return name;
+    }
+    let (stem, ext) = match name.rfind('.') {
+        Some(i) => (&name[..i], &name[i..]),
+        None => (name.as_str(), ""),
+    };
+    let n = (2..).map(|n| format!("{stem} ({n}){ext}")).find(|c| used.insert(key(c))).expect("unbounded range");
+    n
+}
+
 pub fn apply(
     lib: &mut Library,
     group: &AlbumGroup,
@@ -118,6 +136,8 @@ pub fn apply(
     let rel_dir = unique_dir(lib.root(), paths::album_dir(&first.album_artist, &first.album, first.year.as_deref()));
     let abs_dir = lib.root().join(&rel_dir);
     fs::create_dir_all(&abs_dir)?;
+    let mut album_id: Option<i64> = None;
+    let mut used: std::collections::HashSet<String> = std::collections::HashSet::new();
     let result = (|| -> Result<i64> {
         let cover = cover_raw.and_then(|c| prepare_cover(&c).ok());
         let cover_rel = match &cover {
@@ -127,7 +147,7 @@ pub fn apply(
             }
             None => None,
         };
-        let album_id = lib.insert_album(&NewAlbum {
+        let id = lib.insert_album(&NewAlbum {
             title: first.album.clone(),
             album_artist: first.album_artist.clone(),
             year: first.year.clone(),
@@ -137,14 +157,15 @@ pub fn apply(
             cover: cover_rel,
             needs_metadata,
         })?;
+        album_id = Some(id);
         for (src, t) in group.tracks.iter().zip(&tags) {
             let ext = extension(&src.path).unwrap_or_default();
-            let name = paths::track_file_name(t.disc_no, t.disc_total, t.track_no, &t.title, &ext);
+            let name = unique_name(&mut used, paths::track_file_name(t.disc_no, t.disc_total, t.track_no, &t.title, &ext));
             let dest = abs_dir.join(&name);
             fs::copy(&src.path, &dest)?;
             write_tags(&dest, t, cover.as_deref())?;
             lib.insert_track(&NewTrack {
-                album_id,
+                album_id: id,
                 disc: t.disc_no,
                 number: t.track_no,
                 title: t.title.clone(),
@@ -156,10 +177,10 @@ pub fn apply(
                 mb_recording_id: t.mb_recording_id.clone(),
             })?;
         }
-        Ok(album_id)
+        Ok(id)
     })();
     if result.is_err() {
-        if let Some(id) = lib.list_albums().ok().and_then(|a| a.into_iter().find(|r| r.folder_path == abs_dir).map(|r| r.id)) {
+        if let Some(id) = album_id {
             let _ = lib.delete_album(id, false);
         }
         let _ = fs::remove_dir_all(&abs_dir);
@@ -260,5 +281,56 @@ mod tests {
         let group = scan_paths(&[src.clone()]).groups.remove(0);
         assert_eq!(pick_cover(&group, Some(vec![1])), Some(vec![1]));
         assert_eq!(pick_cover(&group, None), Some(b"folderbytes".to_vec()));
+    }
+
+    #[test]
+    fn failure_mid_album_cleans_up_row_and_folder() {
+        let (_d, src, mut lib) = setup();
+        write_wav(&src.join("a.wav"), 1);
+        write_wav(&src.join("b.wav"), 1);
+        let group = scan_paths(&[src.clone()]).groups.remove(0);
+        let bad = group.tracks[1].path.clone();
+        fs::write(&bad, b"not audio at all").unwrap();
+
+        assert!(apply(&mut lib, &group, None, None, true).is_err());
+
+        assert!(lib.list_albums().unwrap().is_empty());
+        assert!(!lib.root().join("Unknown Artist").join("src").exists(), "new folder removed");
+        assert!(group.tracks[0].path.exists() && bad.exists(), "originals untouched");
+        assert_eq!(fs::read(&bad).unwrap(), b"not audio at all");
+    }
+
+    #[test]
+    fn colliding_destination_names_are_disambiguated() {
+        let (_d, src, mut lib) = setup();
+        write_wav(&src.join("a.wav"), 1);
+        write_wav(&src.join("b.wav"), 1);
+        let mut group = scan_paths(&[src.clone()]).groups.remove(0);
+        for t in &mut group.tracks {
+            t.title = Some("Same".into());
+            t.track_no = Some(1);
+        }
+        let id = apply(&mut lib, &group, None, None, true).unwrap();
+        let dir = lib.root().join("Unknown Artist").join("src");
+        assert!(dir.join("01 Same.wav").exists());
+        assert!(dir.join("01 Same (2).wav").exists());
+        assert_eq!(lib.album(id).unwrap().unwrap().track_count, 2);
+    }
+
+    #[test]
+    fn blank_source_tags_fall_back() {
+        let (_d, src, _lib) = setup();
+        write_wav(&src.join("Intro.wav"), 1);
+        let mut group = scan_paths(&[src.clone()]).groups.remove(0);
+        let t = &mut group.tracks[0];
+        t.title = Some("".into());
+        t.album = Some("  ".into());
+        t.artist = Some("".into());
+        t.album_artist = Some(" ".into());
+        let tags = plan_tags(&group, None);
+        assert_eq!(tags[0].title, "Intro");
+        assert_eq!(tags[0].album, "src");
+        assert_eq!(tags[0].album_artist, "Unknown Artist");
+        assert_eq!(tags[0].artist, "Unknown Artist");
     }
 }
