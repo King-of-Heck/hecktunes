@@ -38,9 +38,8 @@ pub fn resolve_job(state: State<AppState>, job_id: u64, choice: JobChoice) -> Cm
 }
 
 #[tauri::command]
-pub fn retry_metadata(state: State<AppState>, album_id: i64) -> CmdResult<()> {
-    state.queue.send(Command::Reimport { album_id });
-    Ok(())
+pub fn retry_metadata(state: State<AppState>, album_id: i64) -> CmdResult<u64> {
+    Ok(state.queue.reimport(album_id))
 }
 
 #[tauri::command]

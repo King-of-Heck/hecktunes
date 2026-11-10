@@ -1,26 +1,14 @@
 <script lang="ts">
-  import { albumTracks, coverUrl, formatDuration, retryMetadata } from '../api';
+  import { albumTracks, coverUrl, formatDuration } from '../api';
   import type { AlbumRow, JobUpdate, TrackRow } from '../types';
-  let { album, bust, jobs, onBack, onEdit }: { album: AlbumRow; bust: number; jobs: Record<number, JobUpdate>; onBack: () => void; onEdit: (tracks: TrackRow[]) => void } = $props();
+  let { album, bust, jobs, retryJobId, onRetry, onBack, onEdit }: { album: AlbumRow; bust: number; jobs: Record<number, JobUpdate>; retryJobId: number | null; onRetry: () => Promise<void>; onBack: () => void; onEdit: (tracks: TrackRow[]) => void } = $props();
 
   let tracks = $state<TrackRow[]>([]);
-  // retry_metadata returns no job id, so identify our re-identify job from the jobs map:
-  // the first job newer than the click whose label matches this album (see Worker::reimport).
-  let since = $state<number | null>(null);
-  let myJobId = $state<number | null>(null);
   let retryError = $state<string | null>(null);
 
-  const labels = $derived([`${album.album_artist} – ${album.title}`, `album ${album.id}`]);
-  $effect(() => {
-    if (since === null || myJobId !== null) return;
-    const found = Object.values(jobs).find((j) => j.job_id > since! && labels.includes(j.label));
-    if (found) myJobId = found.job_id;
-  });
   const terminal = (st: string) => st === 'done' || st === 'failed' || st === 'skipped';
-  // Busy from the click until our job exists and reaches a terminal state (or is cleared).
-  const retrying = $derived(
-    since !== null && (myJobId === null || (jobs[myJobId] !== undefined && !terminal(jobs[myJobId].state))),
-  );
+  // Busy while our retry job exists and has not finished.
+  const retrying = $derived(retryJobId !== null && jobs[retryJobId] !== undefined && !terminal(jobs[retryJobId].state));
 
   $effect(() => {
     // re-load whenever the album row (or bust counter) changes
@@ -34,14 +22,11 @@
 
   async function fix() {
     retryError = null;
-    myJobId = null;
-    since = Math.max(0, ...Object.keys(jobs).map(Number));
     try {
-      await retryMetadata(album.id);
+      await onRetry();
     } catch (e) {
       console.error('retry_metadata failed', e);
       retryError = `Couldn't start lookup: ${e}`;
-      since = null;
     }
   }
 </script>
@@ -84,7 +69,7 @@
   h2 { margin: 0 0 4px; font-size: 24px; }
   .artist { margin: 0; font-size: 16px; color: var(--accent); }
   .meta { margin: 4px 0 12px; color: var(--muted); }
-  .err { margin: 8px 0 0; color: #e5484d; font-size: 13px; }
+  .err { margin: 8px 0 0; color: var(--danger); font-size: 13px; }
   .actions { display: flex; gap: 8px; }
   table { width: 100%; border-collapse: collapse; }
   td { padding: 7px 8px; border-bottom: 1px solid var(--border); }

@@ -16,6 +16,8 @@
   let hovering = $state(false);
   let jobs = $state<Record<number, JobUpdate>>({});
   let bust = $state(0);
+  // album id -> id of its running Fix-metadata job; lives here so it survives AlbumDetail remounts.
+  let retryJobs = $state<Record<number, number>>({});
 
   const visible = $derived(view === 'albums' ? albums : albums.filter((a) => a.needs_metadata));
   const selected = $derived(albums.find((a) => a.id === selectedId) ?? null);
@@ -39,7 +41,13 @@
       await refresh();
       // A re-identified album gets a new id: follow it if it was open.
       if (selectedId !== null && !albums.some((a) => a.id === selectedId)) selectedId = u.album_id;
+      // The old album is gone, so its retry entry is finished with.
+      for (const [albumId, jobId] of Object.entries(retryJobs)) if (jobId === u.job_id) delete retryJobs[Number(albumId)];
     }
+  }
+
+  async function retry(albumId: number) {
+    retryJobs[albumId] = await api.retryMetadata(albumId);
   }
 
   function clearFinished() {
@@ -66,7 +74,7 @@
   <main>
     {#if selected}
       {#key selected.id}
-        <AlbumDetail album={selected} {bust} {jobs} onBack={() => (selectedId = null)} onEdit={(t) => (editing = t)} />
+        <AlbumDetail album={selected} {bust} {jobs} retryJobId={retryJobs[selected.id] ?? null} onRetry={() => retry(selected.id)} onBack={() => (selectedId = null)} onEdit={(t) => (editing = t)} />
       {/key}
     {:else}
       <AlbumGrid albums={visible} {bust} onOpen={(a) => (selectedId = a.id)} />

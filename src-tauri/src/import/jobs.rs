@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::mpsc::{channel, Receiver, Sender};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
@@ -43,12 +44,14 @@ pub enum JobChoice {
 
 pub enum Command {
     Import(Vec<PathBuf>),
-    Reimport { album_id: i64 },
+    Reimport { album_id: i64, job_id: u64 },
     Resolve { job_id: u64, choice: JobChoice },
 }
 
 pub struct ImportQueue {
     tx: Sender<Command>,
+    /// Shared with the worker so ids can be handed out at enqueue time; unique and monotonic.
+    next_id: Arc<AtomicU64>,
 }
 
 impl ImportQueue {
@@ -58,9 +61,17 @@ impl ImportQueue {
         notify: impl Fn(JobUpdate) + Send + 'static,
     ) -> Self {
         let (tx, rx) = channel();
-        let worker = Worker { lib, source, notify: Box::new(notify), next_id: 1, pending: HashMap::new() };
+        let next_id = Arc::new(AtomicU64::new(1));
+        let worker = Worker { lib, source, notify: Box::new(notify), next_id: next_id.clone(), pending: HashMap::new() };
         thread::spawn(move || worker.run(rx));
-        Self { tx }
+        Self { tx, next_id }
+    }
+
+    /// Queues a re-identify of `album_id` and returns the job id its updates will carry.
+    pub fn reimport(&self, album_id: i64) -> u64 {
+        let job_id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let _ = self.tx.send(Command::Reimport { album_id, job_id });
+        job_id
     }
 
     pub fn send(&self, cmd: Command) {
@@ -83,7 +94,7 @@ struct Worker {
     lib: Arc<Mutex<Library>>,
     source: Arc<dyn MetadataSource>,
     notify: Box<dyn Fn(JobUpdate) + Send>,
-    next_id: u64,
+    next_id: Arc<AtomicU64>,
     pending: HashMap<u64, Job>,
 }
 
@@ -92,7 +103,7 @@ impl Worker {
         while let Ok(cmd) = rx.recv() {
             match cmd {
                 Command::Import(paths) => self.import(paths),
-                Command::Reimport { album_id } => self.reimport(album_id),
+                Command::Reimport { album_id, job_id } => self.reimport(album_id, job_id),
                 Command::Resolve { job_id, choice } => self.resolve(job_id, choice),
             }
         }
@@ -103,9 +114,7 @@ impl Worker {
     }
 
     fn new_id(&mut self) -> u64 {
-        let id = self.next_id;
-        self.next_id += 1;
-        id
+        self.next_id.fetch_add(1, Ordering::Relaxed)
     }
 
     fn import(&mut self, paths: Vec<PathBuf>) {
@@ -130,9 +139,8 @@ impl Worker {
         }
     }
 
-    fn reimport(&mut self, album_id: i64) {
+    fn reimport(&mut self, album_id: i64, id: u64) {
         let looked_up = self.lib.lock().unwrap().album(album_id);
-        let id = self.new_id();
         let album = match looked_up {
             Ok(Some(a)) => a,
             Ok(None) => {
@@ -425,7 +433,7 @@ mod tests {
         let q2 = ImportQueue::start(h.lib.clone(), Arc::new(fixed), move |u| {
             let _ = tx.send(u);
         });
-        q2.send(Command::Reimport { album_id: album.id });
+        q2.reimport(album.id);
         let ups = until(&rx, is_terminal);
         assert!(matches!(ups.last().unwrap().state, JobState::Done { matched: true, .. }));
         let albums = h.lib.lock().unwrap().list_albums().unwrap();
@@ -514,7 +522,7 @@ mod tests {
             ref other => panic!("expected matched Done, got {other:?}"),
         };
 
-        q2.send(Command::Reimport { album_id: x });
+        q2.reimport(x);
         let ups = until(&rx2, |s| matches!(s, JobState::Duplicate { .. }) || is_terminal(s));
         let last = ups.last().unwrap();
         assert!(
@@ -589,7 +597,7 @@ mod tests {
         let guard = lock_folder(&old_folder);
 
         let (q2, rx2) = start_queue(h.lib.clone(), fake(&["m9"], vec![candidate("m9", "Album", "Band", &TL)]));
-        q2.send(Command::Reimport { album_id: x });
+        q2.reimport(x);
         let ups = until(&rx2, is_terminal);
         drop(guard);
         let new_id = match ups.last().unwrap().state {
@@ -610,7 +618,7 @@ mod tests {
             h.lib.clone(),
             FlakySource { inner: fake(&[], vec![]), fail_search: true, fail_search_text: false },
         );
-        q2.send(Command::Reimport { album_id: x });
+        q2.reimport(x);
         let ups = until(&rx2, is_terminal);
         match &ups.last().unwrap().state {
             JobState::Failed { error } => assert!(error.contains("network down"), "{error}"),
@@ -652,9 +660,23 @@ mod tests {
     }
 
     #[test]
+    fn reimport_returns_the_job_id_its_updates_carry() {
+        let h = harness(FakeSource { releases: vec![candidate("m1", "Album", "Band", &TL)], search_ids: vec!["m1".into()] });
+        h.queue.send(Command::Import(vec![h.src.clone()]));
+        let first = until(&h.rx, is_terminal);
+        let album_id = h.lib.lock().unwrap().list_albums().unwrap()[0].id;
+        let id = h.queue.reimport(album_id);
+        let ups = until(&h.rx, is_terminal);
+        assert!(ups.len() > 1);
+        assert!(ups.iter().all(|u| u.job_id == id), "all updates carry the returned id");
+        assert!(first.iter().all(|u| u.job_id < id), "ids stay monotonic across import and reimport");
+        assert_ne!(h.queue.reimport(album_id), id);
+    }
+
+    #[test]
     fn reimport_of_missing_album_reports_failed() {
         let h = harness(FakeSource { releases: vec![], search_ids: vec![] });
-        h.queue.send(Command::Reimport { album_id: 999 });
+        h.queue.reimport(999);
         let ups = until(&h.rx, is_terminal);
         assert!(matches!(ups.last().unwrap().state, JobState::Failed { .. }), "{:?}", ups.last());
     }

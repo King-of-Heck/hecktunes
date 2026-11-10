@@ -7,7 +7,7 @@ export const listAlbums = () => invoke<AlbumRow[]>('list_albums');
 export const albumTracks = (albumId: number) => invoke<TrackRow[]>('album_tracks', { albumId });
 export const importPaths = (paths: string[]) => invoke<void>('import_paths', { paths });
 export const resolveJob = (jobId: number, choice: JobChoice) => invoke<void>('resolve_job', { jobId, choice });
-export const retryMetadata = (albumId: number) => invoke<void>('retry_metadata', { albumId });
+export const retryMetadata = (albumId: number) => invoke<number>('retry_metadata', { albumId });
 export const updateAlbum = (albumId: number, edit: AlbumEdit) => invoke<void>('update_album', { albumId, edit });
 export const updateTrack = (trackId: number, edit: TrackEdit) => invoke<void>('update_track', { trackId, edit });
 
