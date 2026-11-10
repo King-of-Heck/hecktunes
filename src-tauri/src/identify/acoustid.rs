@@ -24,6 +24,29 @@ pub fn parse_lookup(v: &Value) -> Vec<String> {
     ids
 }
 
+/// Percent-encodes everything except RFC 3986 unreserved characters.
+fn percent_encode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~') {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
+}
+
+// The fingerprint is URL-safe base64 (no escaping needed); the client key is encoded.
+fn lookup_url(key: &str, duration_secs: u32, fingerprint: &str) -> String {
+    format!(
+        "https://api.acoustid.org/v2/lookup?client={}&meta=recordings+releaseids&duration={}&fingerprint={}",
+        percent_encode(key),
+        duration_secs,
+        fingerprint
+    )
+}
+
 pub struct AcoustId {
     agent: ureq::Agent,
     key: String,
@@ -37,11 +60,7 @@ impl AcoustId {
 
     pub fn lookup(&self, fingerprint: &str, duration_secs: u32) -> Result<Vec<String>> {
         self.limiter.wait();
-        // fingerprint is URL-safe base64 and key is alphanumeric, so no escaping is needed.
-        let url = format!(
-            "https://api.acoustid.org/v2/lookup?client={}&meta=recordings+releaseids&duration={}&fingerprint={}",
-            self.key, duration_secs, fingerprint
-        );
+        let url = lookup_url(&self.key, duration_secs, fingerprint);
         let v: Value = self.agent.get(&url).header("User-Agent", USER_AGENT).call()?.body_mut().read_json()?;
         Ok(parse_lookup(&v))
     }
@@ -55,6 +74,14 @@ mod tests {
     fn parses_release_ids_in_score_order_without_duplicates() {
         let v: Value = serde_json::from_str(include_str!("../../tests/fixtures/acoustid_lookup.json")).unwrap();
         assert_eq!(parse_lookup(&v), vec!["rel-A", "rel-B", "rel-C", "rel-D"]);
+    }
+
+    #[test]
+    fn lookup_url_percent_encodes_the_client_key() {
+        let url = lookup_url("a b&c=d#/\u{e9}", 12, "AQAA-_x");
+        assert!(url.contains("client=a%20b%26c%3Dd%23%2F%C3%A9&"), "{url}");
+        assert!(url.ends_with("&duration=12&fingerprint=AQAA-_x") || url.contains("duration=12&fingerprint=AQAA-_x"));
+        assert_eq!(url.matches('&').count(), 3);
     }
 
     #[test]

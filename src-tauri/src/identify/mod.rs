@@ -41,13 +41,23 @@ pub fn identify(tracks: &[SourceTrack], source: &dyn MetadataSource) -> Result<I
         ids = source.search(album, artist, tracks.len())?;
     }
     if ids.is_empty() {
+        // Rank by how many fingerprinted tracks agree on a release (stable: ties keep first-seen order).
+        let mut counts: Vec<(String, usize)> = Vec::new();
         for t in tracks.iter().take(3) {
+            let mut seen: Vec<String> = Vec::new();
             for id in source.by_fingerprint(t).unwrap_or_default() {
-                if !ids.contains(&id) {
-                    ids.push(id);
+                if seen.contains(&id) {
+                    continue;
+                }
+                seen.push(id.clone());
+                match counts.iter_mut().find(|(k, _)| *k == id) {
+                    Some((_, n)) => *n += 1,
+                    None => counts.push((id, 1)),
                 }
             }
         }
+        counts.sort_by(|a, b| b.1.cmp(&a.1));
+        ids = counts.into_iter().map(|(id, _)| id).collect();
     }
     ids.truncate(MAX_CANDIDATES);
     let candidates: Vec<ReleaseCandidate> = ids.iter().filter_map(|id| source.release(id).ok()).collect();
@@ -151,8 +161,68 @@ mod tests {
         };
         let tracks = [src(None, Some("Album"), Some("Band"), 100_000), src(None, Some("Album"), Some("Band"), 200_000)];
         match identify(&tracks, &fake).unwrap() {
-            Identification::Ambiguous(c) => assert_eq!(c.len(), 2),
+            Identification::Ambiguous(c) => {
+                assert_eq!(c.len(), 2);
+                assert_eq!(c[0].mbid, "a", "exact-duration release must rank first");
+            }
             other => panic!("expected ambiguous, got {other:?}"),
+        }
+    }
+
+    struct PerTrackFp {
+        inner: FakeSource,
+        by_path: Vec<(String, Vec<String>)>,
+    }
+
+    impl MetadataSource for PerTrackFp {
+        fn search(&self, a: &str, b: &str, n: usize) -> Result<Vec<String>> {
+            self.inner.search(a, b, n)
+        }
+        fn search_text(&self, q: &str) -> Result<Vec<String>> {
+            self.inner.search_text(q)
+        }
+        fn by_fingerprint(&self, t: &SourceTrack) -> Result<Vec<String>> {
+            let p = t.path.to_string_lossy().to_string();
+            Ok(self.by_path.iter().find(|(k, _)| *k == p).map(|(_, v)| v.clone()).unwrap_or_default())
+        }
+        fn release(&self, m: &str) -> Result<ReleaseCandidate> {
+            self.inner.release(m)
+        }
+        fn cover(&self, m: &str) -> Result<Option<Vec<u8>>> {
+            self.inner.cover(m)
+        }
+    }
+
+    #[test]
+    fn fingerprint_release_shared_by_all_tracks_beats_one_tracks_many_releases() {
+        let tl3 = [("One", 100_000), ("Two", 200_000), ("Three", 150_000)];
+        let mut releases = vec![candidate("shared", "Album", "Band", &tl3)];
+        let mut noisy: Vec<String> = Vec::new();
+        for i in 0..MAX_CANDIDATES {
+            let id = format!("noise{i}");
+            releases.push(candidate(&id, "Other", "Other", &[("Zzz", 1_000)]));
+            noisy.push(id);
+        }
+        let mut first = noisy.clone();
+        first.push("shared".into());
+        let fake = PerTrackFp {
+            inner: FakeSource { releases, search_ids: vec![] },
+            by_path: vec![
+                ("t0.wav".into(), first),
+                ("t1.wav".into(), vec!["shared".into()]),
+                ("t2.wav".into(), vec!["shared".into()]),
+            ],
+        };
+        let mk = |p: &str, t: &str, ms| {
+            let mut s = src(Some(t), None, None, ms);
+            s.path = p.into();
+            s
+        };
+        let tracks = [mk("t0.wav", "One", 100_000), mk("t1.wav", "Two", 200_000), mk("t2.wav", "Three", 150_000)];
+        match identify(&tracks, &fake).unwrap() {
+            Identification::Matched(r) => assert_eq!(r.mbid, "shared"),
+            Identification::Ambiguous(c) => assert_eq!(c[0].mbid, "shared"),
+            Identification::NotFound => panic!("shared release was crowded out"),
         }
     }
 
