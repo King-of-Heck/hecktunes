@@ -44,6 +44,13 @@ pub fn tagged_wav(path: &Path, secs: u32, title: &str, album: &str, artist: &str
     .unwrap();
 }
 
+pub fn png_bytes(w: u32, h: u32) -> Vec<u8> {
+    let img = image::RgbImage::from_pixel(w, h, image::Rgb([200, 30, 30]));
+    let mut out = std::io::Cursor::new(Vec::new());
+    image::DynamicImage::ImageRgb8(img).write_to(&mut out, image::ImageFormat::Png).unwrap();
+    out.into_inner()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

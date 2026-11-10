@@ -1,3 +1,4 @@
+pub mod artwork;
 pub mod library;
 pub mod model;
 pub mod tags;
