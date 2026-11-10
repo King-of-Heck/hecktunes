@@ -1,0 +1,54 @@
+use crate::import::jobs::{Command, ImportQueue, JobChoice};
+use crate::library::{editing, AlbumEdit, AlbumRow, Library, TrackEdit, TrackRow};
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
+use tauri::State;
+
+pub struct AppState {
+    pub lib: Arc<Mutex<Library>>,
+    pub queue: ImportQueue,
+}
+
+type CmdResult<T> = Result<T, String>;
+
+fn err(e: impl std::fmt::Display) -> String {
+    e.to_string()
+}
+
+#[tauri::command]
+pub fn list_albums(state: State<AppState>) -> CmdResult<Vec<AlbumRow>> {
+    state.lib.lock().unwrap().list_albums().map_err(err)
+}
+
+#[tauri::command]
+pub fn album_tracks(state: State<AppState>, album_id: i64) -> CmdResult<Vec<TrackRow>> {
+    state.lib.lock().unwrap().album_tracks(album_id).map_err(err)
+}
+
+#[tauri::command]
+pub fn import_paths(state: State<AppState>, paths: Vec<String>) -> CmdResult<()> {
+    state.queue.send(Command::Import(paths.into_iter().map(PathBuf::from).collect()));
+    Ok(())
+}
+
+#[tauri::command]
+pub fn resolve_job(state: State<AppState>, job_id: u64, choice: JobChoice) -> CmdResult<()> {
+    state.queue.send(Command::Resolve { job_id, choice });
+    Ok(())
+}
+
+#[tauri::command]
+pub fn retry_metadata(state: State<AppState>, album_id: i64) -> CmdResult<()> {
+    state.queue.send(Command::Reimport { album_id });
+    Ok(())
+}
+
+#[tauri::command]
+pub fn update_album(state: State<AppState>, album_id: i64, edit: AlbumEdit) -> CmdResult<()> {
+    editing::apply_album_edit(&mut state.lib.lock().unwrap(), album_id, &edit).map_err(err)
+}
+
+#[tauri::command]
+pub fn update_track(state: State<AppState>, track_id: i64, edit: TrackEdit) -> CmdResult<()> {
+    editing::apply_track_edit(&mut state.lib.lock().unwrap(), track_id, &edit).map_err(err)
+}

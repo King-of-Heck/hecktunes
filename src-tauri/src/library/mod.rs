@@ -1,3 +1,4 @@
+pub mod editing;
 pub mod paths;
 
 use anyhow::{anyhow, Result};
@@ -256,6 +257,14 @@ impl Library {
             .prepare(&format!("SELECT {TRACK_COLUMNS} FROM tracks WHERE album_id = ?1 ORDER BY disc, number"))?;
         let rows = stmt.query_map([album_id], |r| track_from_row(&root, r))?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    pub fn track(&self, id: i64) -> Result<Option<TrackRow>> {
+        let root = self.root.clone();
+        Ok(self
+            .conn
+            .query_row(&format!("SELECT {TRACK_COLUMNS} FROM tracks WHERE id = ?1"), [id], |r| track_from_row(&root, r))
+            .optional()?)
     }
 
     pub fn find_album_by_release(&self, mbid: &str) -> Result<Option<i64>> {
