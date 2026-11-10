@@ -175,6 +175,45 @@ fn run_migrations(conn: &mut Connection, migrations: &[&str]) -> Result<()> {
     Ok(())
 }
 
+fn insert_album_row(conn: &Connection, a: &NewAlbum) -> Result<i64> {
+    conn.execute(
+        "INSERT INTO albums (title, album_artist, year, genre, mb_release_id, folder_path, cover_path, needs_metadata, added_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        params![
+            a.title,
+            a.album_artist,
+            a.year,
+            a.genre,
+            a.mb_release_id,
+            rel_text(&a.folder),
+            a.cover.as_deref().map(rel_text),
+            a.needs_metadata,
+            now_secs()
+        ],
+    )?;
+    Ok(conn.last_insert_rowid())
+}
+
+fn insert_track_row(conn: &Connection, t: &NewTrack) -> Result<i64> {
+    conn.execute(
+        "INSERT INTO tracks (album_id, disc, number, title, artist, duration_ms, format, file_path, size_bytes, mb_recording_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+        params![
+            t.album_id,
+            t.disc as i64,
+            t.number as i64,
+            t.title,
+            t.artist,
+            t.duration_ms as i64,
+            t.format,
+            rel_text(&t.file),
+            t.size_bytes as i64,
+            t.mb_recording_id
+        ],
+    )?;
+    Ok(conn.last_insert_rowid())
+}
+
 impl Library {
     pub fn open(db_path: &Path, root: PathBuf) -> Result<Self> {
         Self::init(Connection::open(db_path)?, root)
@@ -195,42 +234,23 @@ impl Library {
     }
 
     pub fn insert_album(&mut self, a: &NewAlbum) -> Result<i64> {
-        self.conn.execute(
-            "INSERT INTO albums (title, album_artist, year, genre, mb_release_id, folder_path, cover_path, needs_metadata, added_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-            params![
-                a.title,
-                a.album_artist,
-                a.year,
-                a.genre,
-                a.mb_release_id,
-                rel_text(&a.folder),
-                a.cover.as_deref().map(rel_text),
-                a.needs_metadata,
-                now_secs()
-            ],
-        )?;
-        Ok(self.conn.last_insert_rowid())
+        insert_album_row(&self.conn, a)
     }
 
     pub fn insert_track(&mut self, t: &NewTrack) -> Result<i64> {
-        self.conn.execute(
-            "INSERT INTO tracks (album_id, disc, number, title, artist, duration_ms, format, file_path, size_bytes, mb_recording_id)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-            params![
-                t.album_id,
-                t.disc as i64,
-                t.number as i64,
-                t.title,
-                t.artist,
-                t.duration_ms as i64,
-                t.format,
-                rel_text(&t.file),
-                t.size_bytes as i64,
-                t.mb_recording_id
-            ],
-        )?;
-        Ok(self.conn.last_insert_rowid())
+        insert_track_row(&self.conn, t)
+    }
+
+    /// Inserts an album and its tracks as one unit: either all rows land or none do.
+    /// Each track's `album_id` is ignored and set to the new album's id.
+    pub fn insert_album_with_tracks(&mut self, a: &NewAlbum, tracks: &[NewTrack]) -> Result<i64> {
+        let tx = self.conn.transaction()?;
+        let id = insert_album_row(&tx, a)?;
+        for t in tracks {
+            insert_track_row(&tx, &NewTrack { album_id: id, ..t.clone() })?;
+        }
+        tx.commit()?;
+        Ok(id)
     }
 
     pub fn album(&self, id: i64) -> Result<Option<AlbumRow>> {
@@ -597,5 +617,24 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM sqlite_master WHERE name = 'half_t'", [], |r| r.get(0))
             .unwrap();
         assert_eq!(n, 0);
+    }
+
+    #[test]
+    fn insert_album_with_tracks_is_all_or_nothing() {
+        let mut lib = Library::open_in_memory(PathBuf::from("/lib")).unwrap();
+        let ok = lib.insert_album_with_tracks(&album("X", "Y", None), &[track(0, 1, "Y/X"), track(0, 2, "Y/X")]).unwrap();
+        assert_eq!(lib.album(ok).unwrap().unwrap().track_count, 2);
+        assert!(lib.album_tracks(ok).unwrap().iter().all(|t| t.album_id == ok));
+
+        lib.conn
+            .execute_batch("CREATE TRIGGER boom BEFORE INSERT ON tracks WHEN NEW.number = 9 BEGIN SELECT RAISE(ABORT, 'boom'); END;")
+            .unwrap();
+        let err = lib.insert_album_with_tracks(&album("Z", "Y", None), &[track(0, 1, "Y/Z"), track(0, 9, "Y/Z")]);
+        assert!(err.is_err());
+        let albums = lib.list_albums().unwrap();
+        assert_eq!(albums.len(), 1, "no partial album left behind: {albums:?}");
+        assert_eq!(albums[0].id, ok);
+        let orphans: i64 = lib.conn.query_row("SELECT COUNT(*) FROM tracks WHERE album_id <> ?1", [ok], |r| r.get(0)).unwrap();
+        assert_eq!(orphans, 0);
     }
 }

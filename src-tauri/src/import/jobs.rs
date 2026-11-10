@@ -1,5 +1,5 @@
 use crate::identify::{identify, rank, Identification, MetadataSource};
-use crate::import::apply::{apply, pick_cover};
+use crate::import::apply::{pick_cover, stage};
 use crate::import::scan::{scan_paths, AlbumGroup};
 use crate::library::{paths, Library};
 use crate::model::ReleaseCandidate;
@@ -62,7 +62,9 @@ impl ImportQueue {
     ) -> Self {
         let (tx, rx) = channel();
         let next_id = Arc::new(AtomicU64::new(1));
-        let worker = Worker { lib, source, notify: Box::new(notify), next_id: next_id.clone(), pending: HashMap::new() };
+        // The root never changes after the library is opened; keep a copy so files can be staged unlocked.
+        let root = lib.lock().unwrap().root().to_path_buf();
+        let worker = Worker { lib, root, source, notify: Box::new(notify), next_id: next_id.clone(), pending: HashMap::new() };
         thread::spawn(move || worker.run(rx));
         Self { tx, next_id }
     }
@@ -92,6 +94,7 @@ struct Job {
 
 struct Worker {
     lib: Arc<Mutex<Library>>,
+    root: PathBuf,
     source: Arc<dyn MetadataSource>,
     notify: Box<dyn Fn(JobUpdate) + Send>,
     next_id: Arc<AtomicU64>,
@@ -201,7 +204,9 @@ impl Worker {
         }
         self.emit(job.id, &job.label, JobState::Importing);
         let cover = pick_cover(&job.group, None);
-        let result = apply(&mut self.lib.lock().unwrap(), &job.group, None, cover, needs_metadata);
+        // Copy and tag without the library lock; take it only for the DB transaction.
+        let result = stage(&self.root, &job.group, None, cover, needs_metadata)
+            .and_then(|staged| staged.commit(&mut self.lib.lock().unwrap()));
         match result {
             Ok(album_id) => self.emit(job.id, &job.label, JobState::Done { album_id, matched: false }),
             Err(e) => self.emit(job.id, &job.label, JobState::Failed { error: format!("{e:#}") }),
@@ -214,8 +219,10 @@ impl Worker {
         self.emit(job.id, &job.label, JobState::Importing);
         let online = release.as_ref().and_then(|r| self.source.cover(&r.mbid).ok().flatten());
         let cover = pick_cover(&job.group, online);
+        // Copy and tag without the library lock; take it only for the DB transaction and cleanup.
+        let staged = stage(&self.root, &job.group, release.as_ref(), cover, false);
         let mut lib = self.lib.lock().unwrap();
-        let result = apply(&mut lib, &job.group, release.as_ref(), cover, false);
+        let result = staged.and_then(|s| s.commit(&mut lib));
         if let (Ok(album_id), false) = (&result, replace.is_empty()) {
             if let Err(e) = replace_cleanup(&mut lib, *album_id, &replace) {
                 eprintln!("import job {}: cleanup after replace failed: {}", job.id, ascii(&format!("{e:#}")));

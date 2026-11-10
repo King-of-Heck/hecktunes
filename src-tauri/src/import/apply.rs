@@ -101,13 +101,22 @@ pub fn pick_cover(group: &AlbumGroup, online: Option<Vec<u8>>) -> Option<Vec<u8>
         .or_else(|| find_folder_cover(&group.source_dir))
 }
 
-fn unique_dir(root: &Path, rel: PathBuf) -> PathBuf {
-    if !root.join(&rel).exists() {
-        return rel;
-    }
+/// Creates a fresh album folder under `root`, adding " [2]", " [3]"... if the name is taken.
+/// `create_dir` fails on an existing folder, so the folder returned belongs to this import alone
+/// even if something else creates folders concurrently.
+fn reserve_dir(root: &Path, rel: PathBuf) -> Result<PathBuf> {
     let name = rel.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
     let parent = rel.parent().map(Path::to_path_buf).unwrap_or_default();
-    (2..).map(|n| parent.join(format!("{name} [{n}]"))).find(|p| !root.join(p).exists()).expect("unbounded range")
+    fs::create_dir_all(root.join(&parent))?;
+    let candidates = std::iter::once(rel).chain((2..).map(|n| parent.join(format!("{name} [{n}]"))));
+    for candidate in candidates {
+        match fs::create_dir(root.join(&candidate)) {
+            Ok(()) => return Ok(candidate),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e.into()),
+        }
+    }
+    unreachable!("unbounded range")
 }
 
 /// Disambiguate a destination file name already used in this album: "x.wav" -> "x (2).wav".
@@ -124,21 +133,45 @@ fn unique_name(used: &mut std::collections::HashSet<String>, name: String) -> St
     n
 }
 
-pub fn apply(
-    lib: &mut Library,
+/// An album copied and tagged into its own new library folder, not yet in the database.
+#[must_use = "commit or discard the staged album"]
+pub struct Staged {
+    abs_dir: PathBuf,
+    album: NewAlbum,
+    tracks: Vec<NewTrack>,
+}
+
+impl Staged {
+    /// Inserts the album and its tracks in one transaction. On failure the staged folder is removed.
+    pub fn commit(self, lib: &mut Library) -> Result<i64> {
+        match lib.insert_album_with_tracks(&self.album, &self.tracks) {
+            Ok(id) => Ok(id),
+            Err(e) => {
+                self.discard();
+                Err(e)
+            }
+        }
+    }
+
+    pub fn discard(self) {
+        let _ = fs::remove_dir_all(&self.abs_dir);
+    }
+}
+
+/// Copies and tags the album's files into a new folder under `root`. Touches only the filesystem,
+/// so callers can run it without holding the library lock. On failure nothing is left behind.
+pub fn stage(
+    root: &Path,
     group: &AlbumGroup,
     release: Option<&ReleaseCandidate>,
     cover_raw: Option<Vec<u8>>,
     needs_metadata: bool,
-) -> Result<i64> {
+) -> Result<Staged> {
     let tags = plan_tags(group, release);
     let first = tags.first().ok_or_else(|| anyhow::anyhow!("album has no tracks"))?;
-    let rel_dir = unique_dir(lib.root(), paths::album_dir(&first.album_artist, &first.album, first.year.as_deref()));
-    let abs_dir = lib.root().join(&rel_dir);
-    fs::create_dir_all(&abs_dir)?;
-    let mut album_id: Option<i64> = None;
-    let mut used: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let result = (|| -> Result<i64> {
+    let rel_dir = reserve_dir(root, paths::album_dir(&first.album_artist, &first.album, first.year.as_deref()))?;
+    let abs_dir = root.join(&rel_dir);
+    let result = (|| -> Result<Staged> {
         let cover = cover_raw.and_then(|c| prepare_cover(&c).ok());
         let cover_rel = match &cover {
             Some(bytes) => {
@@ -147,25 +180,16 @@ pub fn apply(
             }
             None => None,
         };
-        let id = lib.insert_album(&NewAlbum {
-            title: first.album.clone(),
-            album_artist: first.album_artist.clone(),
-            year: first.year.clone(),
-            genre: first.genre.clone(),
-            mb_release_id: first.mb_release_id.clone(),
-            folder: rel_dir.clone(),
-            cover: cover_rel,
-            needs_metadata,
-        })?;
-        album_id = Some(id);
+        let mut used = std::collections::HashSet::new();
+        let mut tracks = Vec::with_capacity(tags.len());
         for (src, t) in group.tracks.iter().zip(&tags) {
             let ext = extension(&src.path).unwrap_or_default();
             let name = unique_name(&mut used, paths::track_file_name(t.disc_no, t.disc_total, t.track_no, &t.title, &ext));
             let dest = abs_dir.join(&name);
             fs::copy(&src.path, &dest)?;
             write_tags(&dest, t, cover.as_deref())?;
-            lib.insert_track(&NewTrack {
-                album_id: id,
+            tracks.push(NewTrack {
+                album_id: 0,
                 disc: t.disc_no,
                 number: t.track_no,
                 title: t.title.clone(),
@@ -175,17 +199,36 @@ pub fn apply(
                 file: rel_dir.join(&name),
                 size_bytes: fs::metadata(&dest)?.len(),
                 mb_recording_id: t.mb_recording_id.clone(),
-            })?;
+            });
         }
-        Ok(id)
+        let album = NewAlbum {
+            title: first.album.clone(),
+            album_artist: first.album_artist.clone(),
+            year: first.year.clone(),
+            genre: first.genre.clone(),
+            mb_release_id: first.mb_release_id.clone(),
+            folder: rel_dir.clone(),
+            cover: cover_rel,
+            needs_metadata,
+        };
+        Ok(Staged { abs_dir: abs_dir.clone(), album, tracks })
     })();
     if result.is_err() {
-        if let Some(id) = album_id {
-            let _ = lib.delete_album(id, false);
-        }
         let _ = fs::remove_dir_all(&abs_dir);
     }
     result
+}
+
+/// Stages and commits in one go (holds `lib` throughout; the import worker uses `stage` + `commit`).
+pub fn apply(
+    lib: &mut Library,
+    group: &AlbumGroup,
+    release: Option<&ReleaseCandidate>,
+    cover_raw: Option<Vec<u8>>,
+    needs_metadata: bool,
+) -> Result<i64> {
+    let root = lib.root().to_path_buf();
+    stage(&root, group, release, cover_raw, needs_metadata)?.commit(lib)
 }
 
 #[cfg(test)]
@@ -332,5 +375,26 @@ mod tests {
         assert_eq!(tags[0].album, "src");
         assert_eq!(tags[0].album_artist, "Unknown Artist");
         assert_eq!(tags[0].artist, "Unknown Artist");
+    }
+
+    #[test]
+    fn stage_writes_files_without_db_and_reserves_distinct_folders() {
+        let (_d, src, mut lib) = setup();
+        write_wav(&src.join("a.wav"), 1);
+        let group = scan_paths(&[src.clone()]).groups.remove(0);
+        let root = lib.root().to_path_buf();
+        // Two stagings before any commit (as two importers racing would) must not share a folder.
+        let s1 = stage(&root, &group, None, None, true).unwrap();
+        let s2 = stage(&root, &group, None, None, true).unwrap();
+        assert!(root.join("Unknown Artist").join("src").join("01 a.wav").exists());
+        assert!(root.join("Unknown Artist").join("src [2]").join("01 a.wav").exists());
+        assert!(lib.list_albums().unwrap().is_empty(), "staging touches no rows");
+
+        let id = s1.commit(&mut lib).unwrap();
+        s2.discard();
+        assert!(!root.join("Unknown Artist").join("src [2]").exists());
+        let row = lib.album(id).unwrap().unwrap();
+        assert_eq!(row.track_count, 1);
+        assert!(row.folder_path.ends_with("src"));
     }
 }
