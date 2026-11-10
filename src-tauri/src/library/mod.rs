@@ -163,6 +163,17 @@ fn track_from_row(root: &Path, r: &Row) -> rusqlite::Result<TrackRow> {
     })
 }
 
+fn run_migrations(conn: &mut Connection, migrations: &[&str]) -> Result<()> {
+    let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+    for (i, sql) in migrations.iter().enumerate().skip(version as usize) {
+        let tx = conn.transaction()?;
+        tx.execute_batch(sql)?;
+        tx.execute_batch(&format!("PRAGMA user_version = {}", i + 1))?;
+        tx.commit()?;
+    }
+    Ok(())
+}
+
 impl Library {
     pub fn open(db_path: &Path, root: PathBuf) -> Result<Self> {
         Self::init(Connection::open(db_path)?, root)
@@ -172,13 +183,9 @@ impl Library {
         Self::init(Connection::open_in_memory()?, root)
     }
 
-    fn init(conn: Connection, root: PathBuf) -> Result<Self> {
+    fn init(mut conn: Connection, root: PathBuf) -> Result<Self> {
         conn.execute_batch("PRAGMA foreign_keys = ON;")?;
-        let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-        for (i, sql) in MIGRATIONS.iter().enumerate().skip(version as usize) {
-            conn.execute_batch(sql)?;
-            conn.execute_batch(&format!("PRAGMA user_version = {}", i + 1))?;
-        }
+        run_migrations(&mut conn, MIGRATIONS)?;
         Ok(Self { conn, root })
     }
 
@@ -262,10 +269,20 @@ impl Library {
         let album = self.album(id)?;
         self.conn.execute("DELETE FROM albums WHERE id = ?1", [id])?;
         if let (true, Some(a)) = (remove_files, album) {
-            match fs::remove_dir_all(&a.folder_path) {
-                Ok(()) => {}
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                Err(e) => return Err(e.into()),
+            let inside_root = a.folder_path.starts_with(&self.root)
+                && a.folder_path != self.root
+                && !a.folder_path.components().any(|c| matches!(c, std::path::Component::ParentDir));
+            let shared: i64 = self.conn.query_row(
+                "SELECT COUNT(*) FROM albums WHERE folder_path = ?1",
+                [rel_text(a.folder_path.strip_prefix(&self.root).unwrap_or(Path::new("")))],
+                |r| r.get(0),
+            )?;
+            if inside_root && shared == 0 {
+                match fs::remove_dir_all(&a.folder_path) {
+                    Ok(()) => {}
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(e) => return Err(e.into()),
+                }
             }
         }
         Ok(())
@@ -275,21 +292,38 @@ impl Library {
         let album = self.album(id)?.ok_or_else(|| anyhow!("album {id} not found"))?;
         let tracks = self.album_tracks(id)?;
         let new_abs = self.root.join(new_rel);
+        if new_abs.exists() {
+            return Err(anyhow!("destination {} already exists", new_abs.display()));
+        }
         if let Some(parent) = new_abs.parent() {
             fs::create_dir_all(parent)?;
         }
         fs::rename(&album.folder_path, &new_abs)?;
         let new_rel_s = rel_text(new_rel);
-        let tx = self.conn.transaction()?;
-        tx.execute(
-            "UPDATE albums SET folder_path = ?1, cover_path = CASE WHEN cover_path IS NULL THEN NULL ELSE ?2 END WHERE id = ?3",
-            params![new_rel_s, format!("{new_rel_s}/cover.jpg"), id],
-        )?;
-        for t in tracks {
-            let name = t.file_path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-            tx.execute("UPDATE tracks SET file_path = ?1 WHERE id = ?2", params![format!("{new_rel_s}/{name}"), t.id])?;
+        let new_cover = album
+            .cover_path
+            .as_ref()
+            .and_then(|c| c.file_name())
+            .map(|n| format!("{new_rel_s}/{}", n.to_string_lossy()));
+        let result = (|| -> Result<()> {
+            let tx = self.conn.transaction()?;
+            tx.execute(
+                "UPDATE albums SET folder_path = ?1, cover_path = ?2 WHERE id = ?3",
+                params![new_rel_s, new_cover, id],
+            )?;
+            for t in &tracks {
+                let name = t.file_path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                tx.execute("UPDATE tracks SET file_path = ?1 WHERE id = ?2", params![format!("{new_rel_s}/{name}"), t.id])?;
+            }
+            tx.commit()?;
+            Ok(())
+        })();
+        if let Err(e) = result {
+            if let Err(re) = fs::rename(&new_abs, &album.folder_path) {
+                return Err(anyhow!("{e}; additionally failed to restore folder: {re}"));
+            }
+            return Err(e);
         }
-        tx.commit()?;
         Ok(())
     }
 
@@ -439,5 +473,120 @@ mod tests {
         assert_eq!((row.title.as_str(), row.album_artist.as_str(), row.year.clone(), row.genre.clone()), ("New", "Z", None, Some("rock".into())));
         let tr = &lib.album_tracks(a).unwrap()[0];
         assert_eq!((tr.title.as_str(), tr.artist.as_str(), tr.number), ("Song", "Q", 5));
+    }
+
+    #[test]
+    fn delete_album_never_removes_library_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        fs::write(root.join("keep.txt"), b"x").unwrap();
+        let mut lib = Library::open_in_memory(root.clone()).unwrap();
+        let mut a = album("X", "Y", None);
+        a.folder = PathBuf::new();
+        a.cover = None;
+        let id = lib.insert_album(&a).unwrap();
+        lib.delete_album(id, true).unwrap();
+        assert!(root.join("keep.txt").exists());
+        assert!(lib.album(id).unwrap().is_none());
+    }
+
+    #[test]
+    fn delete_album_never_removes_outside_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("lib");
+        let outside = dir.path().join("outside");
+        fs::create_dir_all(&root).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join("keep.txt"), b"x").unwrap();
+        let mut lib = Library::open_in_memory(root).unwrap();
+        let mut a = album("X", "Y", None);
+        a.folder = PathBuf::from("..").join("outside");
+        a.cover = None;
+        let id = lib.insert_album(&a).unwrap();
+        lib.delete_album(id, true).unwrap();
+        assert!(outside.join("keep.txt").exists());
+    }
+
+    #[test]
+    fn delete_album_keeps_folder_shared_with_another_album() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        fs::create_dir_all(root.join("Y/X")).unwrap();
+        fs::write(root.join("Y/X/01.flac"), b"x").unwrap();
+        let mut lib = Library::open_in_memory(root.clone()).unwrap();
+        let a = lib.insert_album(&album("X", "Y", None)).unwrap();
+        let b = lib.insert_album(&album("X", "Y", None)).unwrap();
+        lib.delete_album(a, true).unwrap();
+        assert!(root.join("Y/X/01.flac").exists());
+        assert!(lib.album(b).unwrap().is_some());
+    }
+
+    #[test]
+    fn move_album_folder_refuses_existing_destination() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        fs::create_dir_all(root.join("Y/Old")).unwrap();
+        fs::write(root.join("Y/Old/01 T1.flac"), b"x").unwrap();
+        fs::create_dir_all(root.join("Y/New")).unwrap();
+        fs::write(root.join("Y/New/other.flac"), b"o").unwrap();
+        let mut lib = Library::open_in_memory(root.clone()).unwrap();
+        let mut a = album("X", "Y", None);
+        a.folder = PathBuf::from("Y/Old");
+        a.cover = None;
+        let id = lib.insert_album(&a).unwrap();
+        lib.insert_track(&track(id, 1, "Y/Old")).unwrap();
+        assert!(lib.move_album_folder(id, Path::new("Y/New")).is_err());
+        assert!(root.join("Y/Old/01 T1.flac").exists());
+        assert!(root.join("Y/New/other.flac").exists());
+        assert_eq!(lib.album(id).unwrap().unwrap().folder_path, root.join("Y").join("Old"));
+    }
+
+    #[test]
+    fn move_album_folder_rolls_back_rename_when_db_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        fs::create_dir_all(root.join("Y/Old")).unwrap();
+        fs::write(root.join("Y/Old/01 T1.flac"), b"x").unwrap();
+        let mut lib = Library::open_in_memory(root.clone()).unwrap();
+        let mut a = album("X", "Y", None);
+        a.folder = PathBuf::from("Y/Old");
+        a.cover = None;
+        let id = lib.insert_album(&a).unwrap();
+        lib.insert_track(&track(id, 1, "Y/Old")).unwrap();
+        lib.conn
+            .execute_batch("CREATE TRIGGER boom BEFORE UPDATE ON tracks BEGIN SELECT RAISE(ABORT, 'boom'); END;")
+            .unwrap();
+        assert!(lib.move_album_folder(id, Path::new("Y/New")).is_err());
+        assert!(root.join("Y/Old/01 T1.flac").exists());
+        assert!(!root.join("Y/New").exists());
+        assert_eq!(lib.album(id).unwrap().unwrap().folder_path, root.join("Y").join("Old"));
+    }
+
+    #[test]
+    fn move_album_folder_keeps_cover_file_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        fs::create_dir_all(root.join("Y/Old")).unwrap();
+        fs::write(root.join("Y/Old/folder.png"), b"x").unwrap();
+        let mut lib = Library::open_in_memory(root.clone()).unwrap();
+        let mut a = album("X", "Y", None);
+        a.folder = PathBuf::from("Y/Old");
+        a.cover = Some(PathBuf::from("Y/Old/folder.png"));
+        let id = lib.insert_album(&a).unwrap();
+        lib.move_album_folder(id, Path::new("Y/New")).unwrap();
+        assert_eq!(lib.album(id).unwrap().unwrap().cover_path, Some(root.join("Y").join("New").join("folder.png")));
+    }
+
+    #[test]
+    fn failed_migration_rolls_back_sql_and_version() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        let migs: &[&str] = &["CREATE TABLE ok_t (a INTEGER);", "CREATE TABLE half_t (a INTEGER); THIS IS NOT SQL;"];
+        assert!(run_migrations(&mut conn, migs).is_err());
+        let v: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+        assert_eq!(v, 1);
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM sqlite_master WHERE name = 'half_t'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 0);
     }
 }
