@@ -1,7 +1,7 @@
 <script lang="ts">
   import { albumTracks, coverUrl, formatDuration, retryMetadata } from '../api';
   import type { AlbumRow, TrackRow } from '../types';
-  let { album, bust, onBack, onEdit }: { album: AlbumRow; bust: number; onBack: () => void; onEdit: (tracks: TrackRow[]) => void } = $props();
+  let { album, bust, settled, onBack, onEdit }: { album: AlbumRow; bust: number; settled: number; onBack: () => void; onEdit: (tracks: TrackRow[]) => void } = $props();
 
   let tracks = $state<TrackRow[]>([]);
   let retrying = $state(false);
@@ -9,12 +9,27 @@
   $effect(() => {
     // re-load whenever the album row (or bust counter) changes
     void bust;
-    albumTracks(album.id).then((t) => (tracks = t));
+    let cancelled = false;
+    albumTracks(album.id)
+      .then((t) => { if (!cancelled) tracks = t; })
+      .catch((e) => console.error('album_tracks failed', e));
+    return () => { cancelled = true; };
+  });
+
+  // A failed/skipped job leaves this album mounted: re-enable the button.
+  $effect(() => {
+    void settled;
+    retrying = false;
   });
 
   async function fix() {
     retrying = true;
-    await retryMetadata(album.id);
+    try {
+      await retryMetadata(album.id);
+    } catch (e) {
+      console.error('retry_metadata failed', e);
+      retrying = false;
+    }
   }
 </script>
 
