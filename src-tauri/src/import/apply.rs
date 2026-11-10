@@ -133,6 +133,19 @@ fn unique_name(used: &mut std::collections::HashSet<String>, name: String) -> St
     n
 }
 
+/// Copies `src` to `dest` and makes the copy writable: on Windows `fs::copy` carries the source's
+/// read-only attribute over, which would make tagging the copy fail. The source is not touched.
+fn copy_writable(src: &Path, dest: &Path) -> Result<()> {
+    fs::copy(src, dest)?;
+    let mut perms = fs::metadata(dest)?.permissions();
+    if perms.readonly() {
+        #[allow(clippy::permissions_set_readonly_false)] // our own fresh copy, not a shared file
+        perms.set_readonly(false);
+        fs::set_permissions(dest, perms)?;
+    }
+    Ok(())
+}
+
 /// An album copied and tagged into its own new library folder, not yet in the database.
 #[must_use = "commit or discard the staged album"]
 pub struct Staged {
@@ -186,7 +199,7 @@ pub fn stage(
             let ext = extension(&src.path).unwrap_or_default();
             let name = unique_name(&mut used, paths::track_file_name(t.disc_no, t.disc_total, t.track_no, &t.title, &ext));
             let dest = abs_dir.join(&name);
-            fs::copy(&src.path, &dest)?;
+            copy_writable(&src.path, &dest)?;
             write_tags(&dest, t, cover.as_deref())?;
             tracks.push(NewTrack {
                 album_id: 0,
@@ -396,5 +409,31 @@ mod tests {
         let row = lib.album(id).unwrap().unwrap();
         assert_eq!(row.track_count, 1);
         assert!(row.folder_path.ends_with("src"));
+    }
+
+    fn set_readonly(p: &std::path::Path, ro: bool) {
+        let mut perms = fs::metadata(p).unwrap().permissions();
+        #[allow(clippy::permissions_set_readonly_false)]
+        perms.set_readonly(ro);
+        fs::set_permissions(p, perms).unwrap();
+    }
+
+    #[test]
+    fn read_only_source_imports_and_stays_read_only() {
+        let (_d, src, mut lib) = setup();
+        tagged_wav(&src.join("a.wav"), 1, "one", "Alb", "Band", 1);
+        let source = src.join("a.wav");
+        let before = fs::read(&source).unwrap();
+        set_readonly(&source, true);
+        let group = scan_paths(&[src.clone()]).groups.remove(0);
+        let result = apply(&mut lib, &group, None, None, true);
+        let still_ro = fs::metadata(&source).unwrap().permissions().readonly();
+        set_readonly(&source, false); // let the temp dir be cleaned up
+        let id = result.expect("read-only source imports");
+        assert!(still_ro, "source keeps its read-only flag");
+        assert_eq!(fs::read(&source).unwrap(), before, "source bytes unchanged");
+        let t = lib.album_tracks(id).unwrap().remove(0);
+        assert!(!fs::metadata(&t.file_path).unwrap().permissions().readonly(), "library copy is writable");
+        assert_eq!(read_source_track(&t.file_path).unwrap().title.as_deref(), Some("one"));
     }
 }
