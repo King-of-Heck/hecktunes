@@ -16,17 +16,18 @@ pub fn load(config_dir: &Path) -> Settings {
 }
 
 /// Picks the AcoustID key: settings.json, then runtime env var, then the
-/// compile-time baked key. Blank/whitespace values count as missing.
+/// compile-time baked key. Blank/whitespace values count as missing; the key is returned trimmed.
 pub fn resolve_acoustid_key(
     settings: Option<String>,
     runtime: Option<String>,
     baked: Option<&str>,
 ) -> Option<String> {
-    let usable = |k: &str| !k.trim().is_empty();
-    settings
-        .filter(|k| usable(k))
-        .or_else(|| runtime.filter(|k| usable(k)))
-        .or_else(|| baked.filter(|k| usable(k)).map(str::to_string))
+    [settings.as_deref(), runtime.as_deref(), baked]
+        .into_iter()
+        .flatten()
+        .map(str::trim)
+        .find(|k| !k.is_empty())
+        .map(str::to_string)
 }
 
 #[cfg(test)]
@@ -49,6 +50,14 @@ mod tests {
         assert_eq!(resolve_acoustid_key(s("  "), s(" \t"), Some("c")), s("c"));
         assert_eq!(resolve_acoustid_key(None, s(""), Some("")), None);
         assert_eq!(resolve_acoustid_key(s("\n"), None, Some("  ")), None);
+    }
+
+    #[test]
+    fn acoustid_key_is_returned_trimmed() {
+        let s = |v: &str| Some(v.to_string());
+        assert_eq!(resolve_acoustid_key(s("  abc \n"), s("b"), Some("c")), s("abc"));
+        assert_eq!(resolve_acoustid_key(None, s("\tdef "), Some("c")), s("def"));
+        assert_eq!(resolve_acoustid_key(None, None, Some(" ghi\r\n")), s("ghi"));
     }
 
     #[test]
