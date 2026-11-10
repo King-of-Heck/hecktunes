@@ -51,6 +51,34 @@ pub fn png_bytes(w: u32, h: u32) -> Vec<u8> {
     out.into_inner()
 }
 
+use crate::model::{CandidateTrack, ReleaseCandidate};
+
+#[allow(dead_code)] // used by identify tests and later tasks
+pub fn candidate(mbid: &str, title: &str, artist: &str, tracks: &[(&str, u64)]) -> ReleaseCandidate {
+    ReleaseCandidate {
+        mbid: mbid.into(),
+        title: title.into(),
+        artist: artist.into(),
+        date: Some("2001-03-04".into()),
+        country: Some("GB".into()),
+        format: Some("CD".into()),
+        genre: Some("rock".into()),
+        disc_count: 1,
+        tracks: tracks
+            .iter()
+            .enumerate()
+            .map(|(i, (t, ms))| CandidateTrack {
+                disc: 1,
+                number: i as u32 + 1,
+                title: t.to_string(),
+                artist: artist.into(),
+                length_ms: Some(*ms),
+                recording_id: format!("rec-{mbid}-{i}"),
+            })
+            .collect(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
