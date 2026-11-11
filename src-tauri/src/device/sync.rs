@@ -58,8 +58,9 @@ fn clean_dir(dir: &Path) -> Result<usize> {
     };
     let mut n = 0;
     for entry in entries {
-        let path = entry?.path();
-        if path.is_dir() {
+        let entry = entry?;
+        let path = entry.path();
+        if entry.file_type().is_ok_and(|t| t.is_dir()) {
             n += clean_dir(&path)?;
         } else if path.file_name().is_some_and(|f| f.to_string_lossy().ends_with(TEMP_SUFFIX)) {
             fs::remove_file(&path).map_err(|e| anyhow!("couldn't remove {}: {e}", path.display()))?;
@@ -308,13 +309,18 @@ mod tests {
         tick(&e, SelectionKind::Album, &a.to_string(), true);
         sync(&e);
         fs::write(e.card.join(MUSIC_DIR).join("mine.mp3"), b"keep").unwrap();
+        let lyrics = e.card.join(MUSIC_DIR).join("Band").join("Alb").join("lyrics.txt");
+        fs::write(&lyrics, b"words").unwrap();
         fs::create_dir_all(e.card.join(".echo")).unwrap();
         fs::write(e.card.join(".echo").join("favorites.bin"), b"fav").unwrap();
 
         tick(&e, SelectionKind::Album, &a.to_string(), false);
         let out = sync(&e);
         assert_eq!(out.removed, 1);
-        assert!(!e.card.join(MUSIC_DIR).join("Band").exists());
+        // A foreign file keeps its folders alive; only our files go.
+        assert_eq!(fs::read(&lyrics).unwrap(), b"words");
+        assert!(e.card.join(MUSIC_DIR).join("Band").join("Alb").is_dir());
+        assert_eq!(card_files(&e.card).len(), 2);
         assert!(e.card.join(MUSIC_DIR).exists());
         assert_eq!(fs::read(e.card.join(MUSIC_DIR).join("mine.mp3")).unwrap(), b"keep");
         assert_eq!(fs::read(e.card.join(".echo").join("favorites.bin")).unwrap(), b"fav");
@@ -360,7 +366,9 @@ mod tests {
         fs::create_dir_all(d1.parent().unwrap()).unwrap();
         fs::copy(src1, &d1).unwrap();
         let d2 = on_card(&e.card, &second.card_path);
-        fs::write(&d2, b"someone else's file").unwrap();
+        // Same size as the wanted file but different bytes: only the hash comparison tells them apart.
+        let foreign = vec![b'x'; second.size as usize];
+        fs::write(&d2, &foreign).unwrap();
         let stray = e.card.join(MUSIC_DIR).join("x.flac.hecktmp");
         fs::write(&stray, b"half").unwrap();
 
@@ -368,7 +376,7 @@ mod tests {
         assert_eq!((out.copied, out.adopted), (0, 1));
         assert_eq!(out.conflicts, vec![second.card_path.clone()]);
         assert!(!stray.exists());
-        assert_eq!(fs::read(&d2).unwrap(), b"someone else's file");
+        assert_eq!(fs::read(&d2).unwrap(), foreign);
         let m = Manifest::load(&e.card).unwrap().unwrap();
         assert!(m.files.contains_key(&first.card_path));
         assert!(!m.files.contains_key(&second.card_path));
@@ -408,6 +416,71 @@ mod tests {
         let mut m = Manifest::new();
         let err = execute(&e.card.join("unplugged"), &SyncPlan::default(), &mut m, &AtomicBool::new(false), &mut |_| {}).unwrap_err();
         assert!(err.to_string().contains("isn't available"), "{err}");
+    }
+
+    #[test]
+    fn removing_the_last_files_prunes_album_folders_but_keeps_music_and_playlists() {
+        let e = env();
+        let a = album(&e, "Alb", "Band", 1, false);
+        let pl = {
+            let mut l = e.lib.lock().unwrap();
+            let id = l.create_playlist("Mix").unwrap();
+            let t = l.album_tracks(a).unwrap()[0].id;
+            l.add_to_playlist(id, &[t]).unwrap();
+            id
+        };
+        tick(&e, SelectionKind::Album, &a.to_string(), true);
+        tick(&e, SelectionKind::Playlist, &pl.to_string(), true);
+        sync(&e);
+
+        tick(&e, SelectionKind::Album, &a.to_string(), false);
+        tick(&e, SelectionKind::Playlist, &pl.to_string(), false);
+        let out = sync(&e);
+        assert_eq!(out.removed, 2);
+        assert!(!e.card.join(MUSIC_DIR).join("Band").exists());
+        assert!(e.card.join(MUSIC_DIR).is_dir());
+        assert!(e.card.join(PLAYLISTS_DIR).is_dir());
+        assert!(card_files(&e.card).is_empty());
+    }
+
+    #[test]
+    fn an_unsafe_copy_path_is_refused_nothing_escapes_the_card_and_the_manifest_is_still_saved() {
+        let e = env();
+        let plan = SyncPlan {
+            copies: vec![Wanted { card_path: "Music/../x.flac".into(), source: Source::Bytes(b"evil".to_vec()), size: 4, hash: "h".into() }],
+            ..SyncPlan::default()
+        };
+        let mut m = Manifest::new();
+        let err = execute(&e.card, &plan, &mut m, &AtomicBool::new(false), &mut |_| {}).unwrap_err();
+        assert!(err.to_string().contains("unsafe"), "{err}");
+        assert!(!e.src.join("x.flac").exists());
+        assert!(!e.card.join("x.flac").exists());
+        assert!(!e.card.join(MUSIC_DIR).join("x.flac").exists());
+        assert!(m.files.is_empty());
+        assert!(Manifest::load(&e.card).unwrap().is_some());
+    }
+
+    #[test]
+    fn cancelling_mid_run_keeps_what_was_copied_in_the_manifest_without_marking_it_synced() {
+        let e = env();
+        let a = album(&e, "Alb", "Band", 3, false);
+        tick(&e, SelectionKind::Album, &a.to_string(), true);
+        let mut p = prepare(&e.lib, &e.card).unwrap();
+        let cancel = AtomicBool::new(false);
+        let out = execute(&e.card, &p.plan, &mut p.manifest, &cancel, &mut |pr| {
+            if pr.done == 0 {
+                cancel.store(true, Ordering::SeqCst);
+            }
+        })
+        .unwrap();
+        assert!(out.cancelled);
+        assert_eq!(out.copied, 1);
+        let m = Manifest::load(&e.card).unwrap().unwrap();
+        assert_eq!(m.files.len(), 1);
+        assert!(m.files.contains_key(&p.plan.copies[0].card_path));
+        assert!(on_card(&e.card, &p.plan.copies[0].card_path).is_file());
+        assert!(!on_card(&e.card, &p.plan.copies[1].card_path).exists());
+        assert!(m.synced_at.is_none());
     }
 
     #[test]
