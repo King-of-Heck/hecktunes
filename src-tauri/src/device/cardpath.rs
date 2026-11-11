@@ -44,6 +44,14 @@ pub fn fold_key(card_path: &str) -> String {
     card_path.to_lowercase()
 }
 
+/// True only for a safe relative card path under /Music or /Playlists. The manifest sits on the
+/// card and can be edited by anyone, so its keys are checked before they are used.
+pub fn is_safe_card_path(p: &str) -> bool {
+    (p.starts_with("Music/") || p.starts_with("Playlists/"))
+        && !p.contains(['\\', ':', '\0'])
+        && p.split('/').all(|s| !s.is_empty() && s != "." && s != "..")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -75,5 +83,15 @@ mod tests {
         let card = Path::new("/card");
         assert_eq!(on_card(card, "Music/a/b.flac"), card.join("Music").join("a").join("b.flac"));
         assert_eq!(fold_key("Music/Band/A.FLAC"), fold_key("music/band/a.flac"));
+    }
+
+    #[test]
+    fn only_safe_relative_card_paths_are_accepted() {
+        for ok in ["Music/A/b.flac", "Playlists/x.m3u8"] {
+            assert!(is_safe_card_path(ok), "{ok}");
+        }
+        for bad in ["../x", "Music/../../x", "/Music/x", "C:/x", "Music\\x", "Music//x", "Other/x", "Music", "Music/./x", "Music/a\0b", "Music/"] {
+            assert!(!is_safe_card_path(bad), "{bad}");
+        }
     }
 }

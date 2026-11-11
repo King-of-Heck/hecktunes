@@ -3,6 +3,7 @@ pub mod cardpath;
 pub mod m3u;
 pub mod manifest;
 pub mod plan;
+pub mod sync;
 
 use crate::library::Library;
 use anyhow::Result;
