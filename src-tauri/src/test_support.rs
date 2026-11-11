@@ -135,3 +135,38 @@ mod tests {
         assert_eq!(tf.properties().duration().as_millis(), 2000);
     }
 }
+
+/// Holds a file open (Windows) or makes the folder read-only (unix) so the folder can't be removed
+/// while the guard lives.
+pub struct FolderLock {
+    #[cfg(windows)]
+    _file: std::fs::File,
+    #[cfg(unix)]
+    dir: std::path::PathBuf,
+}
+
+pub fn lock_folder(dir: &Path) -> FolderLock {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_SHARE_READ: u32 = 1;
+        let file = std::fs::read_dir(dir).unwrap().filter_map(|e| e.ok()).find(|e| e.path().is_file()).unwrap().path();
+        // Readers may still open it (so it can be copied), but nobody may delete it.
+        let f = std::fs::OpenOptions::new().read(true).share_mode(FILE_SHARE_READ).open(file).unwrap();
+        FolderLock { _file: f }
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+        FolderLock { dir: dir.to_path_buf() }
+    }
+}
+
+#[cfg(unix)]
+impl Drop for FolderLock {
+    fn drop(&mut self) {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&self.dir, std::fs::Permissions::from_mode(0o755));
+    }
+}

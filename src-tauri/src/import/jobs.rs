@@ -184,9 +184,9 @@ impl Worker {
     }
 
     fn proceed(&mut self, mut job: Job, release: ReleaseCandidate) {
-        let existing = self.lib.lock().unwrap().find_album_by_release(&release.mbid).ok().flatten();
+        let existing = self.lib.lock().unwrap().find_other_album_by_release(&release.mbid, job.replace_album_id).ok().flatten();
         // During re-identify the album being fixed may legitimately already hold this release.
-        if let Some(existing_album_id) = existing.filter(|e| Some(*e) != job.replace_album_id) {
+        if let Some(existing_album_id) = existing {
             job.chosen = Some(release.clone());
             self.emit(job.id, &job.label, JobState::Duplicate { release, existing_album_id });
             self.pending.insert(job.id, job);
@@ -249,7 +249,7 @@ impl Worker {
             JobChoice::KeepExisting => self.finish_unmatched(job, false),
             JobChoice::Replace => {
                 let release = job.chosen.take();
-                let existing = release.as_ref().and_then(|r| self.lib.lock().unwrap().find_album_by_release(&r.mbid).ok().flatten());
+                let existing = release.as_ref().and_then(|r| self.lib.lock().unwrap().find_other_album_by_release(&r.mbid, job.replace_album_id).ok().flatten());
                 // A re-identified album is superseded too: the new copy is made from its files.
                 let mut replace: Vec<i64> = existing.into_iter().chain(job.replace_album_id).collect();
                 replace.dedup();
@@ -316,7 +316,7 @@ fn ascii(s: &str) -> String {
 mod tests {
     use super::*;
     use crate::library::Library;
-    use crate::test_support::{candidate, tagged_wav, FakeSource};
+    use crate::test_support::{candidate, lock_folder, tagged_wav, FakeSource};
     use std::sync::mpsc::{channel, Receiver};
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
@@ -623,40 +623,6 @@ mod tests {
         assert_eq!(h.lib.lock().unwrap().list_albums().unwrap().len(), 1);
     }
 
-    /// Holds a file open so its folder cannot be removed while the guard lives.
-    struct FolderLock {
-        #[cfg(windows)]
-        _file: std::fs::File,
-        #[cfg(unix)]
-        dir: PathBuf,
-    }
-
-    fn lock_folder(dir: &std::path::Path) -> FolderLock {
-        #[cfg(windows)]
-        {
-            use std::os::windows::fs::OpenOptionsExt;
-            const FILE_SHARE_READ: u32 = 1;
-            let file = std::fs::read_dir(dir).unwrap().filter_map(|e| e.ok()).find(|e| e.path().is_file()).unwrap().path();
-            // Readers may still open it (so it can be copied), but nobody may delete it.
-            let f = std::fs::OpenOptions::new().read(true).share_mode(FILE_SHARE_READ).open(file).unwrap();
-            FolderLock { _file: f }
-        }
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o555)).unwrap();
-            FolderLock { dir: dir.to_path_buf() }
-        }
-    }
-
-    #[cfg(unix)]
-    impl Drop for FolderLock {
-        fn drop(&mut self) {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(&self.dir, std::fs::Permissions::from_mode(0o755));
-        }
-    }
-
     #[test]
     fn reimport_reports_done_even_if_old_album_cleanup_fails() {
         let h = harness(fake(&[], vec![]));
@@ -676,6 +642,7 @@ mod tests {
         let new_album = lib.album(new_id).unwrap().expect("new album committed");
         assert_eq!(new_album.mb_release_id.as_deref(), Some("m9"));
         assert!(new_album.folder_path.exists());
+        assert!(lib.album(x).unwrap().is_some(), "a failed cleanup keeps the old album listed");
     }
 
     #[test]

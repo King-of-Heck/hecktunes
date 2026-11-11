@@ -277,6 +277,7 @@ pub fn stage(
                 file: rel_dir.join(&name),
                 size_bytes: fs::metadata(&dest)?.len(),
                 mb_recording_id: t.mb_recording_id.clone(),
+                content_hash: Some(crate::library::hash::file_hash(&dest)?),
             });
         }
         let album = NewAlbum {

@@ -1,3 +1,4 @@
+use crate::library::hash::file_hash;
 use crate::library::{AlbumEdit, AlbumRow, Library, TrackEdit, TrackRow};
 use crate::model::TrackTags;
 use crate::tags::write_tags;
@@ -21,11 +22,17 @@ fn tags_for(album: &AlbumRow, track: &TrackRow, all: &[TrackRow]) -> TrackTags {
     }
 }
 
-fn rewrite_album_files(lib: &Library, album_id: i64) -> Result<()> {
+fn record_file_state(lib: &mut Library, track: &TrackRow) -> Result<()> {
+    let size = std::fs::metadata(&track.file_path)?.len();
+    lib.set_track_file_state(track.id, size, &file_hash(&track.file_path)?)
+}
+
+fn rewrite_album_files(lib: &mut Library, album_id: i64) -> Result<()> {
     let album = lib.album(album_id)?.ok_or_else(|| anyhow!("album {album_id} not found"))?;
     let tracks = lib.album_tracks(album_id)?;
     for t in &tracks {
         write_tags(&t.file_path, &tags_for(&album, t, &tracks), None)?;
+        record_file_state(lib, t)?;
     }
     Ok(())
 }
@@ -41,7 +48,8 @@ pub fn apply_track_edit(lib: &mut Library, track_id: i64, edit: &TrackEdit) -> R
     let track = lib.track(track_id)?.ok_or_else(|| anyhow!("track {track_id} not found"))?;
     let album = lib.album(track.album_id)?.ok_or_else(|| anyhow!("album {} not found", track.album_id))?;
     let all = lib.album_tracks(track.album_id)?;
-    write_tags(&track.file_path, &tags_for(&album, &track, &all), None)
+    write_tags(&track.file_path, &tags_for(&album, &track, &all), None)?;
+    record_file_state(lib, &track)
 }
 
 #[cfg(test)]
@@ -91,5 +99,30 @@ mod tests {
         let s = read_source_track(&t.file_path).unwrap();
         assert_eq!((s.title.as_deref(), s.artist.as_deref(), s.track_no), (Some("Better"), Some("Guest"), Some(4)));
         assert_eq!(lib.track(t.id).unwrap().unwrap().title, "Better");
+    }
+
+    #[test]
+    fn imports_and_edits_keep_hash_and_size_in_step_with_the_files() {
+        use crate::library::hash::file_hash;
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("s");
+        std::fs::create_dir(&src).unwrap();
+        tagged_wav(&src.join("1.wav"), 1, "a", "Alb", "Band", 1);
+        tagged_wav(&src.join("2.wav"), 1, "b", "Alb", "Band", 2);
+        let mut lib = Library::open_in_memory(dir.path().join("lib")).unwrap();
+        let group = scan_paths(&[src]).groups.remove(0);
+        let id = apply(&mut lib, &group, None, None, false).unwrap();
+        let before = lib.album_tracks(id).unwrap();
+        for t in &before {
+            assert_eq!(t.content_hash.as_deref(), Some(file_hash(&t.file_path).unwrap().as_str()));
+        }
+
+        apply_album_edit(&mut lib, id, &AlbumEdit { title: "Alb".into(), album_artist: "Band".into(), year: None, genre: Some("Rock".into()) }).unwrap();
+
+        for (b, t) in before.iter().zip(lib.album_tracks(id).unwrap()) {
+            assert_ne!(b.content_hash, t.content_hash);
+            assert_eq!(t.content_hash.as_deref(), Some(file_hash(&t.file_path).unwrap().as_str()));
+            assert_eq!(t.size_bytes, std::fs::metadata(&t.file_path).unwrap().len());
+        }
     }
 }

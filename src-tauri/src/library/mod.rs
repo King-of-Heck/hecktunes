@@ -1,4 +1,5 @@
 pub mod editing;
+pub mod hash;
 pub mod paths;
 
 use anyhow::{anyhow, Result};
@@ -36,7 +37,29 @@ CREATE TABLE tracks (
 );
 CREATE INDEX tracks_album ON tracks(album_id);
 CREATE INDEX albums_release ON albums(mb_release_id);
-"#];
+"#,
+    r#"
+ALTER TABLE tracks ADD COLUMN content_hash TEXT;
+CREATE TABLE playlists (
+    id INTEGER PRIMARY KEY,
+    name TEXT NOT NULL UNIQUE COLLATE NOCASE,
+    created_at INTEGER NOT NULL
+);
+CREATE TABLE playlist_items (
+    id INTEGER PRIMARY KEY,
+    playlist_id INTEGER NOT NULL REFERENCES playlists(id) ON DELETE CASCADE,
+    track_id INTEGER NOT NULL REFERENCES tracks(id) ON DELETE CASCADE,
+    position INTEGER NOT NULL
+);
+CREATE INDEX playlist_items_playlist ON playlist_items(playlist_id, position);
+CREATE INDEX playlist_items_track ON playlist_items(track_id);
+CREATE TABLE device_selection (
+    kind TEXT NOT NULL CHECK (kind IN ('album', 'artist', 'playlist')),
+    ref TEXT NOT NULL,
+    PRIMARY KEY (kind, ref)
+);
+"#,
+];
 
 #[derive(Debug, Clone)]
 pub struct NewAlbum {
@@ -62,6 +85,7 @@ pub struct NewTrack {
     pub file: PathBuf,
     pub size_bytes: u64,
     pub mb_recording_id: Option<String>,
+    pub content_hash: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -91,6 +115,7 @@ pub struct TrackRow {
     pub file_path: PathBuf,
     pub size_bytes: u64,
     pub mb_recording_id: Option<String>,
+    pub content_hash: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -131,7 +156,7 @@ fn now_secs() -> i64 {
 }
 
 const ALBUM_COLUMNS: &str = "a.id, a.title, a.album_artist, a.year, a.genre, a.mb_release_id, a.folder_path, a.cover_path, a.needs_metadata, (SELECT COUNT(*) FROM tracks t WHERE t.album_id = a.id)";
-const TRACK_COLUMNS: &str = "id, album_id, disc, number, title, artist, duration_ms, format, file_path, size_bytes, mb_recording_id";
+const TRACK_COLUMNS: &str = "id, album_id, disc, number, title, artist, duration_ms, format, file_path, size_bytes, mb_recording_id, content_hash";
 
 fn album_from_row(root: &Path, r: &Row) -> rusqlite::Result<AlbumRow> {
     Ok(AlbumRow {
@@ -161,6 +186,7 @@ fn track_from_row(root: &Path, r: &Row) -> rusqlite::Result<TrackRow> {
         file_path: abs_path(root, &r.get::<_, String>(8)?),
         size_bytes: r.get::<_, i64>(9)? as u64,
         mb_recording_id: r.get(10)?,
+        content_hash: r.get(11)?,
     })
 }
 
@@ -196,8 +222,8 @@ fn insert_album_row(conn: &Connection, a: &NewAlbum) -> Result<i64> {
 
 fn insert_track_row(conn: &Connection, t: &NewTrack) -> Result<i64> {
     conn.execute(
-        "INSERT INTO tracks (album_id, disc, number, title, artist, duration_ms, format, file_path, size_bytes, mb_recording_id)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+        "INSERT INTO tracks (album_id, disc, number, title, artist, duration_ms, format, file_path, size_bytes, mb_recording_id, content_hash)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
         params![
             t.album_id,
             t.disc as i64,
@@ -208,7 +234,8 @@ fn insert_track_row(conn: &Connection, t: &NewTrack) -> Result<i64> {
             t.format,
             rel_text(&t.file),
             t.size_bytes as i64,
-            t.mb_recording_id
+            t.mb_recording_id,
+            t.content_hash
         ],
     )?;
     Ok(conn.last_insert_rowid())
@@ -288,32 +315,58 @@ impl Library {
     }
 
     pub fn find_album_by_release(&self, mbid: &str) -> Result<Option<i64>> {
+        self.find_other_album_by_release(mbid, None)
+    }
+
+    /// Lowest-id album holding `mbid`, ignoring `exclude` (the album being re-identified).
+    pub fn find_other_album_by_release(&self, mbid: &str, exclude: Option<i64>) -> Result<Option<i64>> {
         Ok(self
             .conn
-            .query_row("SELECT id FROM albums WHERE mb_release_id = ?1 LIMIT 1", [mbid], |r| r.get(0))
+            .query_row(
+                "SELECT id FROM albums WHERE mb_release_id = ?1 AND id IS NOT ?2 ORDER BY id LIMIT 1",
+                params![mbid, exclude],
+                |r| r.get(0),
+            )
             .optional()?)
     }
 
+    /// Removes the album. With `remove_files`, its folder goes first (only when strictly inside the
+    /// root and not shared with another album); if that fails the row is kept, so nothing on disk is
+    /// left without a library entry.
     pub fn delete_album(&mut self, id: i64, remove_files: bool) -> Result<()> {
-        let album = self.album(id)?;
-        self.conn.execute("DELETE FROM albums WHERE id = ?1", [id])?;
-        if let (true, Some(a)) = (remove_files, album) {
-            let inside_root = a.folder_path.starts_with(&self.root)
-                && a.folder_path != self.root
+        let Some(a) = self.album(id)? else { return Ok(()) };
+        if remove_files {
+            let rel = a.folder_path.strip_prefix(&self.root).map(rel_text).unwrap_or_default();
+            let inside_root = !rel.is_empty()
+                && a.folder_path.starts_with(&self.root)
                 && !a.folder_path.components().any(|c| matches!(c, std::path::Component::ParentDir));
             let shared: i64 = self.conn.query_row(
-                "SELECT COUNT(*) FROM albums WHERE folder_path = ?1",
-                [rel_text(a.folder_path.strip_prefix(&self.root).unwrap_or(Path::new("")))],
+                "SELECT COUNT(*) FROM albums WHERE folder_path = ?1 AND id != ?2",
+                params![rel, id],
                 |r| r.get(0),
             )?;
             if inside_root && shared == 0 {
                 match fs::remove_dir_all(&a.folder_path) {
                     Ok(()) => {}
                     Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                    Err(e) => return Err(e.into()),
+                    Err(e) => return Err(anyhow!("couldn't remove {}: {e}", a.folder_path.display())),
+                }
+                if let Some(parent) = a.folder_path.parent().filter(|p| *p != self.root) {
+                    let _ = fs::remove_dir(parent); // only succeeds when the artist folder is now empty
                 }
             }
         }
+        self.conn.execute("DELETE FROM device_selection WHERE kind = 'album' AND ref = ?1", [id.to_string()])?;
+        self.conn.execute("DELETE FROM albums WHERE id = ?1", [id])?;
+        Ok(())
+    }
+
+    /// Records a track file's new size and BLAKE3 hash after its bytes changed (tag rewrite).
+    pub fn set_track_file_state(&mut self, track_id: i64, size_bytes: u64, hash: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE tracks SET size_bytes = ?1, content_hash = ?2 WHERE id = ?3",
+            params![size_bytes as i64, hash, track_id],
+        )?;
         Ok(())
     }
 
@@ -404,6 +457,7 @@ mod tests {
             file: PathBuf::from(rel_dir).join(format!("0{n} T{n}.flac")),
             size_bytes: 10,
             mb_recording_id: None,
+            content_hash: None,
         }
     }
 
@@ -636,5 +690,91 @@ mod tests {
         assert_eq!(albums[0].id, ok);
         let orphans: i64 = lib.conn.query_row("SELECT COUNT(*) FROM tracks WHERE album_id <> ?1", [ok], |r| r.get(0)).unwrap();
         assert_eq!(orphans, 0);
+    }
+
+    #[test]
+    fn upgrades_a_version_1_database_in_place() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
+        run_migrations(&mut conn, &MIGRATIONS[..1]).unwrap();
+        conn.execute("INSERT INTO albums (title, album_artist, folder_path, added_at) VALUES ('A', 'B', 'B/A', 0)", []).unwrap();
+        conn.execute(
+            "INSERT INTO tracks (album_id, disc, number, title, artist, duration_ms, format, file_path, size_bytes)
+             VALUES (1, 1, 1, 'T', 'B', 1000, 'flac', 'B/A/01 T.flac', 10)",
+            [],
+        )
+        .unwrap();
+        let lib = Library::init(conn, PathBuf::from("/lib")).unwrap();
+        let v: i64 = lib.conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+        assert_eq!(v as usize, MIGRATIONS.len());
+        assert_eq!(lib.album_tracks(1).unwrap()[0].content_hash, None);
+        for table in ["playlists", "playlist_items", "device_selection"] {
+            let n: i64 = lib
+                .conn
+                .query_row("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1", [table], |r| r.get(0))
+                .unwrap();
+            assert_eq!(n, 1, "{table}");
+        }
+    }
+
+    #[test]
+    fn stores_and_updates_track_hash_and_size() {
+        let mut lib = Library::open_in_memory(PathBuf::from("/lib")).unwrap();
+        let a = lib.insert_album(&album("A", "B", None)).unwrap();
+        let t = lib.insert_track(&NewTrack { content_hash: Some("h1".into()), ..track(a, 1, "B/A") }).unwrap();
+        assert_eq!(lib.track(t).unwrap().unwrap().content_hash.as_deref(), Some("h1"));
+        lib.set_track_file_state(t, 99, "h2").unwrap();
+        let row = lib.track(t).unwrap().unwrap();
+        assert_eq!((row.size_bytes, row.content_hash.as_deref()), (99, Some("h2")));
+    }
+
+    #[test]
+    fn find_other_album_by_release_skips_the_excluded_album() {
+        let mut lib = Library::open_in_memory(PathBuf::from("/lib")).unwrap();
+        let x = lib.insert_album(&album("X", "B", Some("mb"))).unwrap();
+        let y = lib.insert_album(&album("Y", "B", Some("mb"))).unwrap();
+        assert_eq!(lib.find_other_album_by_release("mb", Some(x)).unwrap(), Some(y));
+        assert_eq!(lib.find_other_album_by_release("mb", Some(y)).unwrap(), Some(x));
+        assert_eq!(lib.find_album_by_release("mb").unwrap(), Some(x));
+        assert_eq!(lib.find_other_album_by_release("none", None).unwrap(), None);
+    }
+
+    #[test]
+    fn failed_file_removal_keeps_the_album_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let mut lib = Library::open_in_memory(root.clone()).unwrap();
+        let a = lib.insert_album(&album("Alb", "Band", None)).unwrap();
+        let folder = root.join("Band").join("Alb");
+        fs::create_dir_all(&folder).unwrap();
+        fs::write(folder.join("01 T1.flac"), b"x").unwrap();
+        let guard = crate::test_support::lock_folder(&folder);
+        assert!(lib.delete_album(a, true).is_err());
+        drop(guard);
+        assert!(lib.album(a).unwrap().is_some(), "the row must survive a failed removal");
+    }
+
+    #[test]
+    fn removing_an_album_also_removes_its_now_empty_artist_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let mut lib = Library::open_in_memory(root.clone()).unwrap();
+        let a = lib.insert_album(&album("Alb", "Band", None)).unwrap();
+        let folder = root.join("Band").join("Alb");
+        fs::create_dir_all(&folder).unwrap();
+        fs::write(folder.join("01 T1.flac"), b"x").unwrap();
+        lib.delete_album(a, true).unwrap();
+        assert!(!root.join("Band").exists());
+        assert!(root.exists());
+    }
+
+    #[test]
+    fn deleting_an_album_clears_its_echo_mini_tick() {
+        let mut lib = Library::open_in_memory(PathBuf::from("/lib")).unwrap();
+        let a = lib.insert_album(&album("A", "B", None)).unwrap();
+        lib.conn.execute("INSERT INTO device_selection (kind, ref) VALUES ('album', ?1)", [a.to_string()]).unwrap();
+        lib.delete_album(a, false).unwrap();
+        let n: i64 = lib.conn.query_row("SELECT COUNT(*) FROM device_selection", [], |r| r.get(0)).unwrap();
+        assert_eq!(n, 0);
     }
 }
