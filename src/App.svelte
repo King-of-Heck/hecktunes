@@ -1,25 +1,34 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import * as api from './lib/api';
-  import type { AlbumRow, JobUpdate, TrackRow, View } from './lib/types';
+  import type { AlbumRow, JobUpdate, PlaylistRow, TrackRow, View } from './lib/types';
   import ReleasePicker from './lib/components/ReleasePicker.svelte';
   import TagEditor from './lib/components/TagEditor.svelte';
   import Sidebar from './lib/components/Sidebar.svelte';
   import AlbumGrid from './lib/components/AlbumGrid.svelte';
   import AlbumDetail from './lib/components/AlbumDetail.svelte';
+  import ArtistList from './lib/components/ArtistList.svelte';
+  import SongsView from './lib/components/SongsView.svelte';
   import DropOverlay from './lib/components/DropOverlay.svelte';
   import ImportTray from './lib/components/ImportTray.svelte';
 
-  let view = $state<View>('albums');
+  let view = $state<View>({ kind: 'albums' });
   let albums = $state<AlbumRow[]>([]);
+  let playlists = $state<PlaylistRow[]>([]);
   let selectedId = $state<number | null>(null);
   let hovering = $state(false);
   let jobs = $state<Record<number, JobUpdate>>({});
   let bust = $state(0);
+  // bumped after imports/edits so the Songs view reloads
+  let songsVersion = $state(0);
   // album id -> id of its running Fix-metadata job; lives here so it survives AlbumDetail remounts.
   let retryJobs = $state<Record<number, number>>({});
 
-  const visible = $derived(view === 'albums' ? albums : albums.filter((a) => a.needs_metadata));
+  const needs = $derived(albums.filter((a) => a.needs_metadata));
+  const artistName = $derived(view.kind === 'artists' ? (view.artist ?? null) : null);
+  const gridAlbums = $derived(
+    view.kind === 'needs_metadata' ? needs : artistName !== null ? albums.filter((a) => a.album_artist === artistName) : albums,
+  );
   const selected = $derived(albums.find((a) => a.id === selectedId) ?? null);
   const jobList = $derived(Object.values(jobs).sort((a, b) => b.job_id - a.job_id));
 
@@ -33,12 +42,29 @@
   async function refresh() {
     albums = await api.listAlbums();
     bust++;
+    songsVersion++;
+  }
+
+  async function refreshPlaylists() {
+    playlists = await api.listPlaylists();
+  }
+
+  function select(v: View) {
+    view = v;
+    selectedId = null;
+  }
+
+  async function createPlaylist(name: string) {
+    const id = await api.createPlaylist(name);
+    await refreshPlaylists();
+    select({ kind: 'playlist', id });
   }
 
   async function onJob(u: JobUpdate) {
     jobs[u.job_id] = u;
     if (u.state === 'done') {
       await refresh();
+      await refreshPlaylists();
       // A re-identified album gets a new id: follow it if it was open.
       if (selectedId !== null && !albums.some((a) => a.id === selectedId)) selectedId = u.album_id;
       // The old album is gone, so its retry entry is finished with.
@@ -56,13 +82,16 @@
     }
   }
 
+  const logError = (what: string) => (e: unknown) => console.error(what, e);
+
   onMount(() => {
-    refresh().catch((e) => console.error('refresh failed', e));
+    refresh().catch(logError('refresh failed'));
+    refreshPlaylists().catch(logError('playlists failed'));
     const unlisten = [
       api.onImportJob(onJob),
       api.onFileDrop({
         hover: (on) => (hovering = on),
-        drop: (paths) => api.importPaths(paths).catch((e) => console.error('import failed', e)),
+        drop: (paths) => api.importPaths(paths).catch(logError('import failed')),
       }),
     ];
     return () => unlisten.forEach((p) => p.then((off) => off()));
@@ -70,14 +99,43 @@
 </script>
 
 <div class="layout">
-  <Sidebar {view} needsCount={albums.filter((a) => a.needs_metadata).length} onSelect={(v) => { view = v; selectedId = null; }} />
+  <Sidebar {view} needsCount={needs.length} {playlists} syncing={false} onSelect={select} onCreatePlaylist={createPlaylist} />
   <main>
     {#if selected}
       {#key selected.id}
-        <AlbumDetail album={selected} {bust} {jobs} retryJobId={retryJobs[selected.id] ?? null} onRetry={() => retry(selected.id)} onBack={() => (selectedId = null)} onEdit={(t) => (editing = t)} />
+        <AlbumDetail
+          album={selected}
+          {bust}
+          {jobs}
+          {playlists}
+          retryJobId={retryJobs[selected.id] ?? null}
+          onRetry={() => retry(selected.id)}
+          onBack={() => (selectedId = null)}
+          onEdit={(t) => (editing = t)}
+          onPlaylistsChanged={refreshPlaylists}
+          onRemoved={async () => {
+            selectedId = null;
+            await refresh();
+            await refreshPlaylists();
+          }}
+        />
       {/key}
+    {:else if view.kind === 'artists' && artistName === null}
+      <ArtistList {albums} {bust} onOpen={(artist) => (view = { kind: 'artists', artist })} />
+    {:else if view.kind === 'songs'}
+      <SongsView version={songsVersion} {playlists} onOpenAlbum={(id) => (selectedId = id)} onPlaylistsChanged={refreshPlaylists} />
+    {:else if view.kind === 'playlist'}
+      <p class="placeholder">Playlist view arrives in the next task.</p>
+    {:else if view.kind === 'device'}
+      <p class="placeholder">Echo Mini sync arrives in a later task.</p>
     {:else}
-      <AlbumGrid albums={visible} {bust} onOpen={(a) => (selectedId = a.id)} />
+      {#if artistName !== null}
+        <div class="crumbs">
+          <button class="back" onclick={() => (view = { kind: 'artists' })}>← Artists</button>
+          <h2>{artistName}</h2>
+        </div>
+      {/if}
+      <AlbumGrid albums={gridAlbums} {bust} onOpen={(a) => (selectedId = a.id)} />
     {/if}
   </main>
 </div>
@@ -89,10 +147,14 @@
   {/key}
 {/if}
 {#if editing && selected}
-  <TagEditor album={selected} tracks={editing} onClose={(changed) => { editing = null; if (changed) refresh().catch((e) => console.error('refresh failed', e)); }} />
+  <TagEditor album={selected} tracks={editing} onClose={(changed) => { editing = null; if (changed) refresh().catch(logError('refresh failed')); }} />
 {/if}
 
 <style>
   .layout { display: grid; grid-template-columns: 210px 1fr; height: 100vh; }
   main { overflow: auto; }
+  .crumbs { padding: 16px 24px 0; }
+  .crumbs h2 { margin: 4px 0 0; font-size: 22px; }
+  .back { border: none; background: none; color: var(--accent); padding: 0; }
+  .placeholder { padding: 24px; color: var(--muted); }
 </style>

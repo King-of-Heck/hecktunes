@@ -1,10 +1,48 @@
 <script lang="ts">
-  import { albumTracks, coverUrl, formatDuration } from '../api';
-  import type { AlbumRow, JobUpdate, TrackRow } from '../types';
-  let { album, bust, jobs, retryJobId, onRetry, onBack, onEdit }: { album: AlbumRow; bust: number; jobs: Record<number, JobUpdate>; retryJobId: number | null; onRetry: () => Promise<void>; onBack: () => void; onEdit: (tracks: TrackRow[]) => void } = $props();
+  import { albumTracks, coverUrl, deleteAlbum, formatDuration } from '../api';
+  import type { AlbumRow, JobUpdate, PlaylistRow, TrackRow } from '../types';
+  import AddToPlaylist from './AddToPlaylist.svelte';
+  let {
+    album,
+    bust,
+    jobs,
+    playlists,
+    retryJobId,
+    onRetry,
+    onBack,
+    onEdit,
+    onPlaylistsChanged,
+    onRemoved,
+  }: {
+    album: AlbumRow;
+    bust: number;
+    jobs: Record<number, JobUpdate>;
+    playlists: PlaylistRow[];
+    retryJobId: number | null;
+    onRetry: () => Promise<void>;
+    onBack: () => void;
+    onEdit: (tracks: TrackRow[]) => void;
+    onPlaylistsChanged: () => Promise<void>;
+    onRemoved: () => Promise<void>;
+  } = $props();
 
   let tracks = $state<TrackRow[]>([]);
   let retryError = $state<string | null>(null);
+  let confirming = $state(false);
+  let removing = $state(false);
+  let removeError = $state<string | null>(null);
+
+  async function remove() {
+    removing = true;
+    removeError = null;
+    try {
+      await deleteAlbum(album.id);
+      await onRemoved();
+    } catch (e) {
+      removeError = `Couldn't remove: ${e}`;
+      removing = false;
+    }
+  }
 
   const terminal = (st: string) => st === 'done' || st === 'failed' || st === 'skipped';
   // Busy while our retry job exists and has not finished.
@@ -42,8 +80,18 @@
       <div class="actions">
         <button onclick={() => onEdit(tracks)}>Edit tags</button>
         <button onclick={fix} disabled={retrying}>{retrying ? 'Looking up…' : 'Fix metadata'}</button>
+        <AddToPlaylist trackIds={tracks.map((t) => t.id)} {playlists} {onPlaylistsChanged} label="Add to playlist" />
+        {#if !confirming}<button onclick={() => (confirming = true)}>Remove from library</button>{/if}
       </div>
+      {#if confirming}
+        <p class="confirm">
+          Remove this album and delete its files from the library folder? Your original files aren't touched.
+          <button class="danger" onclick={remove} disabled={removing}>Remove</button>
+          <button onclick={() => (confirming = false)} disabled={removing}>Cancel</button>
+        </p>
+      {/if}
       {#if retryError}<p class="err">{retryError}</p>{/if}
+      {#if removeError}<p class="err">{removeError}</p>{/if}
     </div>
   </header>
   <table>
@@ -54,6 +102,7 @@
           <td>{t.title}{#if t.artist !== album.album_artist}<span class="feat"> — {t.artist}</span>{/if}</td>
           <td class="fmt">{t.format.toUpperCase()}</td>
           <td class="dur">{formatDuration(t.duration_ms)}</td>
+          <td class="add"><AddToPlaylist trackIds={[t.id]} {playlists} {onPlaylistsChanged} /></td>
         </tr>
       {/each}
     </tbody>
@@ -70,7 +119,10 @@
   .artist { margin: 0; font-size: 16px; color: var(--accent); }
   .meta { margin: 4px 0 12px; color: var(--muted); }
   .err { margin: 8px 0 0; color: var(--danger); font-size: 13px; }
-  .actions { display: flex; gap: 8px; }
+  .actions { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  .confirm { margin: 10px 0 0; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .danger { background: var(--danger); color: #fff; border-color: var(--danger); }
+  .add { width: 1%; white-space: nowrap; }
   table { width: 100%; border-collapse: collapse; }
   td { padding: 7px 8px; border-bottom: 1px solid var(--border); }
   .num, .dur, .fmt { color: var(--muted); width: 1%; white-space: nowrap; }

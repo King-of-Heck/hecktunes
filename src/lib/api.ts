@@ -1,7 +1,22 @@
 import { convertFileSrc, invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { getCurrentWebview } from '@tauri-apps/api/webview';
-import type { AlbumEdit, AlbumRow, JobChoice, JobUpdate, TrackEdit, TrackRow } from './types';
+import type {
+  AlbumEdit,
+  AlbumRow,
+  JobChoice,
+  JobUpdate,
+  PlanSummary,
+  PlaylistEntry,
+  PlaylistRow,
+  Selection,
+  SelectionKind,
+  SongRow,
+  SyncEvent,
+  TrackEdit,
+  TrackRow,
+  Volume,
+} from './types';
 
 export const listAlbums = () => invoke<AlbumRow[]>('list_albums');
 export const albumTracks = (albumId: number) => invoke<TrackRow[]>('album_tracks', { albumId });
@@ -10,12 +25,34 @@ export const resolveJob = (jobId: number, choice: JobChoice) => invoke<void>('re
 export const retryMetadata = (albumId: number) => invoke<number>('retry_metadata', { albumId });
 export const updateAlbum = (albumId: number, edit: AlbumEdit) => invoke<void>('update_album', { albumId, edit });
 export const updateTrack = (trackId: number, edit: TrackEdit) => invoke<void>('update_track', { trackId, edit });
+export const listSongs = () => invoke<SongRow[]>('list_songs');
+export const deleteAlbum = (albumId: number) => invoke<void>('delete_album', { albumId });
+
+export const listPlaylists = () => invoke<PlaylistRow[]>('list_playlists');
+export const createPlaylist = (name: string) => invoke<number>('create_playlist', { name });
+export const renamePlaylist = (playlistId: number, name: string) => invoke<void>('rename_playlist', { playlistId, name });
+export const deletePlaylist = (playlistId: number) => invoke<void>('delete_playlist', { playlistId });
+export const playlistEntries = (playlistId: number) => invoke<PlaylistEntry[]>('playlist_entries', { playlistId });
+export const addToPlaylist = (playlistId: number, trackIds: number[]) => invoke<void>('add_to_playlist', { playlistId, trackIds });
+export const removePlaylistItems = (playlistId: number, itemIds: number[]) =>
+  invoke<void>('remove_playlist_items', { playlistId, itemIds });
+export const movePlaylistItem = (playlistId: number, itemId: number, toIndex: number) =>
+  invoke<void>('move_playlist_item', { playlistId, itemId, toIndex });
+
+export const getSelection = () => invoke<Selection>('get_selection');
+export const setSelected = (kind: SelectionKind, reference: string, on: boolean) =>
+  invoke<void>('set_selected', { kind, reference, on });
+export const listVolumes = () => invoke<Volume[]>('list_volumes');
+export const previewSync = (card: string) => invoke<PlanSummary>('preview_sync', { card });
+export const startSync = (card: string) => invoke<void>('start_sync', { card });
+export const cancelSync = () => invoke<void>('cancel_sync');
 
 /** `bust` changes after edits so the webview reloads a rewritten cover. */
 export const coverUrl = (path: string | null, bust = 0) => (path ? `${convertFileSrc(path)}?v=${bust}` : null);
 
 export const onImportJob = (cb: (u: JobUpdate) => void): Promise<UnlistenFn> =>
   listen<JobUpdate>('import-job', (e) => cb(e.payload));
+export const onSync = (cb: (e: SyncEvent) => void): Promise<UnlistenFn> => listen<SyncEvent>('sync', (e) => cb(e.payload));
 
 export function onFileDrop(handlers: { hover: (on: boolean) => void; drop: (paths: string[]) => void }): Promise<UnlistenFn> {
   return getCurrentWebview().onDragDropEvent((e) => {
@@ -32,4 +69,11 @@ export function onFileDrop(handlers: { hover: (on: boolean) => void; drop: (path
 export function formatDuration(ms: number): string {
   const s = Math.round(ms / 1000);
   return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+}
+
+export function formatBytes(n: number): string {
+  if (n <= 0) return '0 KB';
+  if (n < 1024 ** 2) return `${Math.max(1, Math.round(n / 1024))} KB`;
+  if (n < 1024 ** 3) return `${Math.round(n / 1024 ** 2)} MB`;
+  return `${(n / 1024 ** 3).toFixed(1)} GB`;
 }

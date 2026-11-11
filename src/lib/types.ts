@@ -23,6 +23,26 @@ export interface TrackRow {
   file_path: string;
   size_bytes: number;
   mb_recording_id: string | null;
+  content_hash: string | null;
+}
+
+/** A track plus its album's fields (flat, as serialized by Rust). */
+export interface SongRow extends TrackRow {
+  album_title: string;
+  album_artist: string;
+  year: string | null;
+}
+
+export interface PlaylistRow {
+  id: number;
+  name: string;
+  track_count: number;
+  duration_ms: number;
+}
+
+/** One line of a playlist; `item_id` identifies the line (a song can appear twice). */
+export interface PlaylistEntry extends SongRow {
+  item_id: number;
 }
 
 export interface CandidateTrack {
@@ -79,4 +99,73 @@ export interface TrackEdit {
   number: number;
 }
 
-export type View = 'albums' | 'needs_metadata';
+export type SelectionKind = 'album' | 'artist' | 'playlist';
+
+export interface Selection {
+  albums: number[];
+  artists: string[];
+  playlists: number[];
+}
+
+export interface Volume {
+  root: string;
+  label: string;
+  file_system: string;
+  total: number;
+  available: number;
+  removable: boolean;
+  player_internal: boolean;
+  hecktunes_card: boolean;
+  last_synced: number | null;
+}
+
+export interface PlanSummary {
+  add: number;
+  replace: number;
+  remove: number;
+  unchanged: number;
+  bytes_to_copy: number;
+  bytes_freed: number;
+  space_needed: number;
+  available: number | null;
+  fits: boolean;
+  warnings: string[];
+  first_sync: boolean;
+}
+
+export interface SyncProgress {
+  phase: 'removing' | 'copying';
+  done: number;
+  total: number;
+  bytes_done: number;
+  bytes_total: number;
+  current: string;
+}
+
+export interface SyncOutcome {
+  copied: number;
+  removed: number;
+  adopted: number;
+  conflicts: string[];
+  cancelled: boolean;
+}
+
+export type EchoSyncOutcome =
+  | { status: 'done'; log: string }
+  | { status: 'failed'; code: number | null; log: string }
+  | { status: 'missing'; reason: string };
+
+export type SyncEvent =
+  | { state: 'preparing' }
+  | ({ state: 'progress' } & SyncProgress)
+  | { state: 'echo_sync' }
+  | { state: 'finished'; outcome: SyncOutcome; echo_sync: EchoSyncOutcome | null; warnings: string[] }
+  | { state: 'failed'; error: string };
+
+export type View =
+  | { kind: 'albums' }
+  | { kind: 'artists'; artist?: string }
+  | { kind: 'songs' }
+  | { kind: 'needs_metadata' }
+  | { kind: 'playlist'; id: number }
+  | { kind: 'device' };
