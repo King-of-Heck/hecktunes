@@ -7,6 +7,8 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
+    "sidecar": "node scripts/fetch-echo-sync.mjs",
+    "postinstall": "node scripts/fetch-echo-sync.mjs --soft",
     "check": "svelte-check --tsconfig ./tsconfig.app.json && tsc -p tsconfig.node.json"
   },
   "devDependencies": {

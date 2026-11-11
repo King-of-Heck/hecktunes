@@ -1,5 +1,7 @@
 //! Putting a chosen part of the library on the Echo Mini's microSD card.
 pub mod cardpath;
+pub mod detect;
+pub mod echosync;
 pub mod m3u;
 pub mod manifest;
 pub mod plan;
