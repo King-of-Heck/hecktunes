@@ -121,21 +121,6 @@ impl MetadataSource for FakeSource {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use lofty::prelude::*;
-
-    #[test]
-    fn wav_helper_writes_readable_file_of_expected_length() {
-        let dir = tempfile::tempdir().unwrap();
-        let p = dir.path().join("a.wav");
-        write_wav(&p, 2);
-        let tf = lofty::read_from_path(&p).unwrap();
-        assert_eq!(tf.properties().duration().as_millis(), 2000);
-    }
-}
-
 /// Holds a file open (Windows) or makes the folder read-only (unix) so the folder can't be removed
 /// while the guard lives.
 pub struct FolderLock {
@@ -170,3 +155,57 @@ impl Drop for FolderLock {
         let _ = std::fs::set_permissions(&self.dir, std::fs::Permissions::from_mode(0o755));
     }
 }
+
+/// Album + track rows only (no files) for library/DB tests. Returns (album id, track ids).
+/// Track n is titled "T<n>" with duration 1000*n ms.
+pub fn add_memory_album(lib: &mut crate::library::Library, title: &str, artist: &str, tracks: u32) -> (i64, Vec<i64>) {
+    use crate::library::{NewAlbum, NewTrack};
+    let folder = std::path::PathBuf::from(artist).join(title);
+    let id = lib
+        .insert_album(&NewAlbum {
+            title: title.into(),
+            album_artist: artist.into(),
+            year: None,
+            genre: None,
+            mb_release_id: None,
+            folder: folder.clone(),
+            cover: None,
+            needs_metadata: false,
+        })
+        .unwrap();
+    let ids = (1..=tracks)
+        .map(|n| {
+            lib.insert_track(&NewTrack {
+                album_id: id,
+                disc: 1,
+                number: n,
+                title: format!("T{n}"),
+                artist: artist.into(),
+                duration_ms: 1000 * n as u64,
+                format: "flac".into(),
+                file: folder.join(format!("{n:02} T{n}.flac")),
+                size_bytes: 10,
+                mb_recording_id: None,
+                content_hash: None,
+            })
+            .unwrap()
+        })
+        .collect();
+    (id, ids)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use lofty::prelude::*;
+
+    #[test]
+    fn wav_helper_writes_readable_file_of_expected_length() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("a.wav");
+        write_wav(&p, 2);
+        let tf = lofty::read_from_path(&p).unwrap();
+        assert_eq!(tf.properties().duration().as_millis(), 2000);
+    }
+}
+

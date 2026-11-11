@@ -1,6 +1,11 @@
 pub mod editing;
 pub mod hash;
 pub mod paths;
+pub mod playlists;
+pub mod selection;
+
+pub use playlists::{PlaylistEntry, PlaylistRow, SongRow};
+pub use selection::{Selection, SelectionKind};
 
 use anyhow::{anyhow, Result};
 use rusqlite::{params, Connection, OptionalExtension, Row};

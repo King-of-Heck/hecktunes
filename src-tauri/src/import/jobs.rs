@@ -288,6 +288,9 @@ impl Worker {
 fn replace_cleanup(lib: &mut Library, album_id: i64, old: &[i64]) -> anyhow::Result<()> {
     let mut first_err = None;
     for &id in old.iter().filter(|&&id| id != album_id) {
+        if let Err(e) = lib.transfer_album_refs(id, album_id) {
+            first_err.get_or_insert(e);
+        }
         if let Err(e) = lib.delete_album(id, true) {
             first_err.get_or_insert(e);
         }
@@ -572,6 +575,32 @@ mod tests {
             JobState::Done { album_id, matched: false } => album_id,
             ref other => panic!("expected unmatched Done, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn fix_metadata_keeps_playlist_lines_and_echo_mini_tick() {
+        use crate::library::SelectionKind;
+        let h = harness(fake(&[], vec![]));
+        let x = import_unmatched(&h);
+        let pl = {
+            let mut lib = h.lib.lock().unwrap();
+            let ids: Vec<i64> = lib.album_tracks(x).unwrap().iter().map(|t| t.id).collect();
+            let pl = lib.create_playlist("Mix").unwrap();
+            lib.add_to_playlist(pl, &ids).unwrap();
+            lib.set_selected(SelectionKind::Album, &x.to_string(), true).unwrap();
+            pl
+        };
+        let (q2, rx2) = start_queue(h.lib.clone(), fake(&["m9"], vec![candidate("m9", "Album", "Band", &TL)]));
+        q2.reimport(x);
+        let new_id = match until(&rx2, is_terminal).last().unwrap().state {
+            JobState::Done { album_id, .. } => album_id,
+            ref other => panic!("expected Done, got {other:?}"),
+        };
+        let lib = h.lib.lock().unwrap();
+        let entries = lib.playlist_entries(pl).unwrap();
+        assert_eq!(entries.len(), 2);
+        assert!(entries.iter().all(|e| e.song.track.album_id == new_id));
+        assert_eq!(lib.selection().unwrap().albums, vec![new_id]);
     }
 
     #[test]
