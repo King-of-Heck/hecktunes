@@ -215,18 +215,14 @@ mod tests {
         #[cfg(windows)]
         {
             let p = dir.join(format!("silent{code}.cmd"));
-            std::fs::write(&p, format!("@echo off
-exit /b {code}
-")).unwrap();
+            std::fs::write(&p, format!("@echo off\r\nexit /b {code}\r\n")).unwrap();
             p
         }
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             let p = dir.join(format!("silent{code}.sh"));
-            std::fs::write(&p, format!("#!/bin/sh
-exit {code}
-")).unwrap();
+            std::fs::write(&p, format!("#!/bin/sh\nexit {code}\n")).unwrap();
             std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
             p
         }
@@ -246,22 +242,14 @@ exit {code}
         #[cfg(windows)]
         {
             let p = dir.join("sleeper.cmd");
-            std::fs::write(&p, "@echo off
-echo started
-ping -n 12 127.0.0.1 >nul
-exit /b 0
-").unwrap();
+            std::fs::write(&p, "@echo off\r\necho started\r\nping -n 12 127.0.0.1 >nul\r\nexit /b 0\r\n").unwrap();
             p
         }
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             let p = dir.join("sleeper.sh");
-            std::fs::write(&p, "#!/bin/sh
-echo started
-sleep 30
-exit 0
-").unwrap();
+            std::fs::write(&p, "#!/bin/sh\necho started\nsleep 12\nexit 0\n").unwrap();
             std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
             p
         }
