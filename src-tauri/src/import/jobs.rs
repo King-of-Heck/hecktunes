@@ -289,7 +289,9 @@ fn replace_cleanup(lib: &mut Library, album_id: i64, old: &[i64]) -> anyhow::Res
     let mut first_err = None;
     for &id in old.iter().filter(|&&id| id != album_id) {
         if let Err(e) = lib.transfer_album_refs(id, album_id) {
+            // Deleting the old album now would drop its playlist lines and tick: keep it.
             first_err.get_or_insert(e);
+            continue;
         }
         if let Err(e) = lib.delete_album(id, true) {
             first_err.get_or_insert(e);
@@ -766,5 +768,23 @@ mod tests {
             other => panic!("expected Failed, got {other:?}"),
         }
         assert_eq!(h.lib.lock().unwrap().list_albums().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn replace_cleanup_keeps_an_old_album_whose_references_could_not_be_moved() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut lib = Library::open_in_memory(dir.path().join("lib")).unwrap();
+        let (old, t) = crate::test_support::add_memory_album(&mut lib, "Alb", "Band", 2);
+        let (new, _) = crate::test_support::add_memory_album(&mut lib, "Alb (fixed)", "Band", 2);
+        let p = lib.create_playlist("Mix").unwrap();
+        lib.add_to_playlist(p, &[t[0]]).unwrap();
+        lib.exec_sql_for_test(
+            "CREATE TEMP TRIGGER no_moves BEFORE UPDATE ON playlist_items BEGIN SELECT RAISE(ABORT, 'forced failure'); END;",
+        );
+        let err = replace_cleanup(&mut lib, new, &[old]).unwrap_err();
+        assert!(format!("{err:#}").contains("forced failure"), "{err:#}");
+        // Deleting it now would drop its playlist lines: the old album must stay.
+        assert!(lib.album(old).unwrap().is_some());
+        assert_eq!(lib.playlist_entries(p).unwrap()[0].song.track.id, t[0]);
     }
 }

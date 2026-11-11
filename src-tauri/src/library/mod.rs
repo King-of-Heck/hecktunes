@@ -261,6 +261,12 @@ impl Library {
         Ok(Self { conn, root })
     }
 
+    /// Runs raw SQL against the database (tests only: forcing failures, clearing hashes).
+    #[cfg(test)]
+    pub fn exec_sql_for_test(&self, sql: &str) {
+        self.conn.execute_batch(sql).unwrap();
+    }
+
     pub fn root(&self) -> &Path {
         &self.root
     }
