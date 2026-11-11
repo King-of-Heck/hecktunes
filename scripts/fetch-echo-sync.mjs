@@ -5,7 +5,7 @@
 //   --soft  never fail (used by postinstall); print a warning instead.
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -22,6 +22,11 @@ const NOT_AVAILABLE_EXIT = 3;
 const args = process.argv.slice(2);
 const soft = args.includes('--soft');
 const targetArg = args.includes('--target') ? args[args.indexOf('--target') + 1] : undefined;
+if (args.includes('--target') && (!targetArg || targetArg.startsWith('--'))) {
+  // A usage mistake, not a download problem: fail even with --soft.
+  console.error('echo-sync: --target needs a target triple, e.g. --target x86_64-pc-windows-msvc');
+  process.exit(1);
+}
 
 function hostTriple() {
   const out = execFileSync('rustc', ['-vV'], { encoding: 'utf8' });
@@ -48,9 +53,13 @@ async function main() {
     console.warn(`echo-sync: no ${VERSION} build for ${triple}; wrote a stand-in.`);
     return;
   }
-  if (existsSync(out) && sha256(readFileSync(out)) === asset.sha256) {
-    console.log(`echo-sync ${VERSION} already present for ${triple}`);
-    return;
+  if (existsSync(out)) {
+    if (sha256(readFileSync(out)) === asset.sha256) {
+      console.log(`echo-sync ${VERSION} already present for ${triple}`);
+      return;
+    }
+    // Never leave an unverified binary behind, whatever happens with the download below.
+    rmSync(out, { force: true });
   }
   const res = await fetch(`${BASE}/${asset.name}`);
   if (!res.ok) throw new Error(`download failed: HTTP ${res.status} for ${asset.name}`);

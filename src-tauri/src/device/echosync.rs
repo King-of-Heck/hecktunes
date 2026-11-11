@@ -40,10 +40,17 @@ pub fn run(exe: &Path, card: &Path) -> EchoSyncOutcome {
             let stderr = String::from_utf8_lossy(&out.stderr);
             match out.status.code() {
                 Some(0) => EchoSyncOutcome::Done { log: tail(&stdout, LOG_LINES) },
-                Some(NOT_AVAILABLE_EXIT) => EchoSyncOutcome::Missing { reason: stderr.trim().to_string() },
+                Some(NOT_AVAILABLE_EXIT) => EchoSyncOutcome::Missing { reason: not_available_reason(&stderr) },
                 code => EchoSyncOutcome::Failed { code, log: tail(&format!("{stdout}{stderr}"), LOG_LINES) },
             }
         }
+    }
+}
+
+fn not_available_reason(stderr: &str) -> String {
+    match stderr.trim() {
+        "" => "echo-sync isn't available for this platform".to_string(),
+        s => s.to_string(),
     }
 }
 
@@ -105,6 +112,37 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         assert!(matches!(run(&fake(dir.path(), NOT_AVAILABLE_EXIT), dir.path()), EchoSyncOutcome::Missing { .. }));
         assert!(matches!(run(&dir.path().join("no-such-echo-sync"), dir.path()), EchoSyncOutcome::Missing { .. }));
+    }
+
+    /// A fake that exits with `code` without printing anything.
+    fn silent(dir: &Path, code: i32) -> PathBuf {
+        #[cfg(windows)]
+        {
+            let p = dir.join(format!("silent{code}.cmd"));
+            std::fs::write(&p, format!("@echo off
+exit /b {code}
+")).unwrap();
+            p
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let p = dir.join(format!("silent{code}.sh"));
+            std::fs::write(&p, format!("#!/bin/sh
+exit {code}
+")).unwrap();
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+            p
+        }
+    }
+
+    #[test]
+    fn a_silent_platform_stand_in_still_gets_a_reason() {
+        let dir = tempfile::tempdir().unwrap();
+        match run(&silent(dir.path(), NOT_AVAILABLE_EXIT), dir.path()) {
+            EchoSyncOutcome::Missing { reason } => assert_eq!(reason, "echo-sync isn't available for this platform"),
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]
