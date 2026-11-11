@@ -6,6 +6,7 @@ use crate::library::Library;
 use anyhow::{bail, Result};
 use serde::Serialize;
 use std::path::{Path, PathBuf};
+use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -53,16 +54,39 @@ impl SyncService {
         }
         self.cancel.store(false, Ordering::SeqCst);
         let (lib, echo, running, cancel) = (self.lib.clone(), self.echo_sync.clone(), self.running.clone(), self.cancel.clone());
-        std::thread::spawn(move || {
+        let spawned = std::thread::Builder::new().name("hecktunes-sync".into()).spawn(move || {
+            let flag = ClearOnDrop(running);
             notify(SyncEvent::Preparing);
-            let last = match run(&lib, &card, echo.as_deref(), &cancel, &notify) {
-                Ok(event) => event,
-                Err(e) => SyncEvent::Failed { error: format!("{e:#}") },
+            let work = std::panic::catch_unwind(AssertUnwindSafe(|| run(&lib, &card, echo.as_deref(), &cancel, &notify)));
+            let last = match work {
+                Ok(Ok(event)) => event,
+                Ok(Err(e)) => SyncEvent::Failed { error: format!("{e:#}") },
+                Err(payload) => SyncEvent::Failed { error: panic_message(payload.as_ref()) },
             };
-            running.store(false, Ordering::SeqCst);
+            drop(flag);
             notify(last);
         });
+        if let Err(e) = spawned {
+            self.running.store(false, Ordering::SeqCst);
+            return Err(anyhow::Error::new(e).context("Couldn't start the sync thread"));
+        }
         Ok(())
+    }
+}
+
+/// Clears the running flag when dropped, so no exit path can leave the service stuck.
+struct ClearOnDrop(Arc<AtomicBool>);
+
+impl Drop for ClearOnDrop {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
+    }
+}
+
+fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
+    match payload.downcast_ref::<&str>().map(|s| s.to_string()).or_else(|| payload.downcast_ref::<String>().cloned()) {
+        Some(m) => format!("the sync stopped unexpectedly: {m}"),
+        None => "the sync stopped unexpectedly".to_string(),
     }
 }
 
@@ -167,5 +191,65 @@ mod tests {
             .find(|e| matches!(e, SyncEvent::Finished { .. } | SyncEvent::Failed { .. }))
             .unwrap();
         assert!(matches!(last, SyncEvent::Failed { .. }), "{last:?}");
+    }
+
+    fn drain_to_final(rx: &std::sync::mpsc::Receiver<SyncEvent>) -> SyncEvent {
+        std::iter::from_fn(|| rx.recv_timeout(Duration::from_secs(5)).ok())
+            .find(|e| matches!(e, SyncEvent::Finished { .. } | SyncEvent::Failed { .. }))
+            .expect("a final event")
+    }
+
+    #[test]
+    fn a_panicking_sync_reports_failure_and_does_not_stay_stuck() {
+        let dir = tempfile::tempdir().unwrap();
+        let lib = Arc::new(Mutex::new(Library::open_in_memory(dir.path().join("lib")).unwrap()));
+        let l2 = lib.clone();
+        let _ = std::thread::spawn(move || {
+            let _g = l2.lock().unwrap();
+            panic!("poisoning on purpose");
+        })
+        .join();
+        let svc = SyncService::new(lib, None);
+        let (tx, rx) = std::sync::mpsc::channel();
+        svc.start(dir.path().join("card"), move |e| {
+            let _ = tx.send(e);
+        })
+        .unwrap();
+        match drain_to_final(&rx) {
+            SyncEvent::Failed { error } => assert!(error.contains("stopped unexpectedly"), "{error}"),
+            other => panic!("expected Failed, got {other:?}"),
+        }
+        assert!(!svc.is_running());
+        assert!(svc.start(dir.path().join("card"), |_| {}).is_ok());
+    }
+
+    #[test]
+    fn a_second_start_while_running_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let card = dir.path().join("card");
+        std::fs::create_dir(&card).unwrap();
+        let lib = Arc::new(Mutex::new(Library::open_in_memory(dir.path().join("lib")).unwrap()));
+        let svc = SyncService::new(lib.clone(), None);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let guard = lib.lock().unwrap();
+        svc.start(card.clone(), move |e| {
+            let _ = tx.send(e);
+        })
+        .unwrap();
+        let err = svc.start(card, |_| {}).unwrap_err();
+        assert!(err.to_string().contains("already running"), "{err}");
+        drop(guard);
+        let last = drain_to_final(&rx);
+        assert!(matches!(last, SyncEvent::Finished { .. } | SyncEvent::Failed { .. }));
+    }
+
+    #[test]
+    fn finished_event_serializes_with_outcome_and_echo_sync() {
+        let outcome = Outcome { copied: 2, ..Default::default() };
+        let ev = SyncEvent::Finished { outcome, echo_sync: Some(EchoSyncOutcome::Done { log: "ok".into() }), warnings: vec![] };
+        let v = serde_json::to_value(ev).unwrap();
+        assert_eq!(v["state"], "finished");
+        assert_eq!(v["outcome"]["copied"], 2);
+        assert_eq!(v["echo_sync"]["status"], "done");
     }
 }
