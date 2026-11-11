@@ -9,6 +9,7 @@
   import AlbumDetail from './lib/components/AlbumDetail.svelte';
   import ArtistList from './lib/components/ArtistList.svelte';
   import SongsView from './lib/components/SongsView.svelte';
+  import PlaylistView from './lib/components/PlaylistView.svelte';
   import DropOverlay from './lib/components/DropOverlay.svelte';
   import ImportTray from './lib/components/ImportTray.svelte';
 
@@ -26,6 +27,8 @@
 
   const needs = $derived(albums.filter((a) => a.needs_metadata));
   const artistName = $derived(view.kind === 'artists' ? (view.artist ?? null) : null);
+  const playlistId = $derived(view.kind === 'playlist' ? view.id : null);
+  const currentPlaylist = $derived(playlists.find((p) => p.id === playlistId) ?? null);
   const gridAlbums = $derived(
     view.kind === 'needs_metadata' ? needs : artistName !== null ? albums.filter((a) => a.album_artist === artistName) : albums,
   );
@@ -125,7 +128,19 @@
     {:else if view.kind === 'songs'}
       <SongsView version={songsVersion} {playlists} onOpenAlbum={(id) => (selectedId = id)} onPlaylistsChanged={refreshPlaylists} />
     {:else if view.kind === 'playlist'}
-      <p class="placeholder">Playlist view arrives in the next task.</p>
+      {#if currentPlaylist}
+        {#key currentPlaylist.id}
+          <PlaylistView
+            playlist={currentPlaylist}
+            onChanged={refreshPlaylists}
+            onDeleted={async () => {
+              select({ kind: 'albums' });
+              await refreshPlaylists();
+            }}
+            onOpenAlbum={(id) => (selectedId = id)}
+          />
+        {/key}
+      {/if}
     {:else if view.kind === 'device'}
       <p class="placeholder">Echo Mini sync arrives in a later task.</p>
     {:else}
