@@ -7,6 +7,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 pub const MANIFEST_DIR: &str = ".hecktunes";
 pub const MANIFEST_FILE: &str = "manifest.json";
+/// The only manifest layout this HeckTunes reads and writes.
+pub const MANIFEST_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FileEntry {
@@ -31,7 +33,7 @@ impl Default for Manifest {
 
 impl Manifest {
     pub fn new() -> Self {
-        Self { version: 1, card_id: new_card_id(), synced_at: None, files: BTreeMap::new() }
+        Self { version: MANIFEST_VERSION, card_id: new_card_id(), synced_at: None, files: BTreeMap::new() }
     }
 
     pub fn path(card: &Path) -> PathBuf {
@@ -46,12 +48,20 @@ impl Manifest {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(e) => return Err(anyhow!("couldn't read {}: {e}", path.display())),
         };
-        serde_json::from_str(&text).map(Some).map_err(|e| {
+        let m: Self = serde_json::from_str(&text).map_err(|e| {
             anyhow!(
                 "{} is damaged ({e}). HeckTunes won't change this card until that file is fixed or deleted.",
                 path.display()
             )
-        })
+        })?;
+        if m.version != MANIFEST_VERSION {
+            return Err(anyhow!(
+                "{} is manifest version {}, which this HeckTunes doesn't understand. HeckTunes won't change this card until that file is fixed or deleted.",
+                path.display(),
+                m.version
+            ));
+        }
+        Ok(Some(m))
     }
 
     /// Writes a temp file and renames it, so an unplugged card keeps the previous manifest.
@@ -113,5 +123,16 @@ mod tests {
         assert_ne!(a, b);
         assert_eq!(a.len(), 16);
         assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn a_manifest_from_another_version_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut m = Manifest::new();
+        m.version = 2;
+        m.save(dir.path()).unwrap();
+        let err = Manifest::load(dir.path()).unwrap_err().to_string();
+        assert!(err.contains("version 2"), "{err}");
+        assert!(err.contains("won't change this card"), "{err}");
     }
 }
