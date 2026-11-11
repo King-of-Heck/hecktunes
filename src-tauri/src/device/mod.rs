@@ -15,6 +15,9 @@ use plan::{Snapshot, SyncPlan};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
+/// Serializes hash backfills across the process (see `prepare`).
+static BACKFILL: Mutex<()> = Mutex::new(());
+
 pub struct Prepared {
     pub plan: SyncPlan,
     pub manifest: Manifest,
@@ -25,6 +28,10 @@ pub struct Prepared {
 /// folder, backfills missing track hashes outside the lock, reads the card's manifest and works out
 /// the sync plan.
 pub fn prepare(lib: &Mutex<Library>, card: &Path) -> Result<Prepared> {
+    // Overlapping previews and syncs wait for each other here instead of hashing the same files in
+    // parallel; the snapshot is taken under this guard so a waiter sees the hashes just stored.
+    // Lock order: BACKFILL, then the Library lock (never the other way round).
+    let backfill = BACKFILL.lock().unwrap_or_else(|e| e.into_inner());
     let mut snap = {
         let l = lib.lock().unwrap();
         Snapshot::take(&l)?
@@ -34,9 +41,16 @@ pub fn prepare(lib: &Mutex<Library>, card: &Path) -> Result<Prepared> {
     if !updates.is_empty() {
         let mut l = lib.lock().unwrap();
         for (id, size, hash) in &updates {
-            l.set_track_file_state(*id, *size, hash)?;
+            if !l.set_track_hash_if_missing(*id, *size, hash)? {
+                // Something (a tag edit) stored a newer hash meanwhile: plan with that one.
+                if let (Some(fresh), Some(song)) = (l.track(*id)?, snap.songs.iter_mut().find(|s| s.track.id == *id)) {
+                    song.track.size_bytes = fresh.size_bytes;
+                    song.track.content_hash = fresh.content_hash;
+                }
+            }
         }
     }
+    drop(backfill);
     let (wanted, warnings) = plan::wanted_files(&snap);
     let existing = Manifest::load(card)?;
     let first_sync = existing.is_none();
@@ -177,5 +191,21 @@ mod tests {
         let card = dir.path().join("MusicCard");
         std::fs::create_dir(&card).unwrap();
         assert_eq!(prepare(&lib, &card).unwrap().plan.added, 1);
+    }
+
+    #[test]
+    fn only_selected_tracks_without_a_hash_are_hashed() {
+        let dir = tempfile::tempdir().unwrap();
+        let lib = Mutex::new(Library::open_in_memory(dir.path().join("lib")).unwrap());
+        let a = add_album(&mut lib.lock().unwrap(), dir.path(), "Alb", "Band", 2, false);
+        let b = add_album(&mut lib.lock().unwrap(), dir.path(), "Other", "Solo", 2, false);
+        lib.lock().unwrap().set_selected(SelectionKind::Album, &a.to_string(), true).unwrap();
+        lib.lock().unwrap().exec_sql_for_test("UPDATE tracks SET content_hash = NULL");
+        let card = dir.path().join("card");
+        std::fs::create_dir(&card).unwrap();
+        assert_eq!(prepare(&lib, &card).unwrap().plan.added, 2);
+        let l = lib.lock().unwrap();
+        assert!(l.album_tracks(a).unwrap().iter().all(|t| t.content_hash.is_some()));
+        assert!(l.album_tracks(b).unwrap().iter().all(|t| t.content_hash.is_none()), "unselected tracks must not be hashed");
     }
 }

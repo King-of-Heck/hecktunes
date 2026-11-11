@@ -40,11 +40,30 @@ impl Snapshot {
     }
 }
 
-/// Hashes tracks stored before hashes existed. Returns (track id, size, hash) for the caller to save.
-/// A track whose file is missing keeps `None` and is skipped (with a warning) by `wanted_files`.
+/// Ids of the tracks the selection puts on the card: songs of ticked albums and artists, and the
+/// tracks of ticked playlists.
+pub fn selected_track_ids(s: &Snapshot) -> HashSet<i64> {
+    let sel = &s.selection;
+    let albums: HashSet<i64> = s
+        .albums
+        .iter()
+        .filter(|a| sel.albums.contains(&a.id) || sel.artists.contains(&a.album_artist))
+        .map(|a| a.id)
+        .collect();
+    let mut ids: HashSet<i64> = s.songs.iter().filter(|x| albums.contains(&x.track.album_id)).map(|x| x.track.id).collect();
+    for (_, entries) in s.playlists.iter().filter(|(p, _)| sel.playlists.contains(&p.id)) {
+        ids.extend(entries.iter().map(|e| e.song.track.id));
+    }
+    ids
+}
+
+/// Hashes the selected tracks stored before hashes existed (unselected ones are left alone).
+/// Returns (track id, size, hash) for the caller to save. A track whose file is missing keeps
+/// `None` and is skipped (with a warning) by `wanted_files`.
 pub fn fill_missing_hashes(s: &mut Snapshot) -> Vec<(i64, u64, String)> {
+    let wanted = selected_track_ids(s);
     let mut updates = Vec::new();
-    for song in s.songs.iter_mut().filter(|x| x.track.content_hash.is_none()) {
+    for song in s.songs.iter_mut().filter(|x| x.track.content_hash.is_none() && wanted.contains(&x.track.id)) {
         let t = &mut song.track;
         if let (Ok(meta), Ok(hash)) = (std::fs::metadata(&t.file_path), file_hash(&t.file_path)) {
             t.size_bytes = meta.len();
@@ -95,18 +114,12 @@ impl Collector {
 pub fn wanted_files(s: &Snapshot) -> (Vec<Wanted>, Vec<String>) {
     let sel = &s.selection;
     let picked: Vec<&(PlaylistRow, Vec<PlaylistEntry>)> = s.playlists.iter().filter(|(p, _)| sel.playlists.contains(&p.id)).collect();
-    let playlist_tracks: HashSet<i64> = picked.iter().flat_map(|(_, e)| e.iter().map(|x| x.song.track.id)).collect();
-    let albums: HashSet<i64> = s
-        .albums
-        .iter()
-        .filter(|a| sel.albums.contains(&a.id) || sel.artists.contains(&a.album_artist))
-        .map(|a| a.id)
-        .collect();
+    let selected = selected_track_ids(s);
 
     let mut c = Collector::default();
     let mut card_paths: HashMap<i64, String> = HashMap::new();
     let mut cover_albums = BTreeSet::new();
-    for song in s.songs.iter().filter(|x| albums.contains(&x.track.album_id) || playlist_tracks.contains(&x.track.id)) {
+    for song in s.songs.iter().filter(|x| selected.contains(&x.track.id)) {
         let t = &song.track;
         let (Some(path), Some(hash)) = (track_card_path(&s.root, &t.file_path), t.content_hash.clone()) else {
             c.warnings.push(format!("Skipped \"{}\" ({}): its file is missing from the library folder", t.title, song.album_title));

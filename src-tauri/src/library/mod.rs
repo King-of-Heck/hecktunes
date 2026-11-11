@@ -372,6 +372,16 @@ impl Library {
         Ok(())
     }
 
+    /// Stores a backfilled size and hash only if the track still has no hash, so a hash computed
+    /// from an older read of the file can never replace a newer one. Returns whether it was stored.
+    pub fn set_track_hash_if_missing(&mut self, track_id: i64, size_bytes: u64, hash: &str) -> Result<bool> {
+        let n = self.conn.execute(
+            "UPDATE tracks SET size_bytes = ?1, content_hash = ?2 WHERE id = ?3 AND content_hash IS NULL",
+            params![size_bytes as i64, hash, track_id],
+        )?;
+        Ok(n > 0)
+    }
+
     /// Records a track file's new size and BLAKE3 hash after its bytes changed (tag rewrite).
     pub fn set_track_file_state(&mut self, track_id: i64, size_bytes: u64, hash: &str) -> Result<()> {
         self.conn.execute(
@@ -787,5 +797,17 @@ mod tests {
         lib.delete_album(a, false).unwrap();
         let n: i64 = lib.conn.query_row("SELECT COUNT(*) FROM device_selection", [], |r| r.get(0)).unwrap();
         assert_eq!(n, 0);
+    }
+
+    #[test]
+    fn a_backfilled_hash_never_overwrites_one_already_stored() {
+        let mut l = Library::open_in_memory(PathBuf::from("/lib")).unwrap();
+        let (_, t) = crate::test_support::add_memory_album(&mut l, "Alb", "Band", 2);
+        l.set_track_file_state(t[0], 10, "newer").unwrap();
+        assert!(!l.set_track_hash_if_missing(t[0], 99, "stale").unwrap());
+        assert!(l.set_track_hash_if_missing(t[1], 12, "first").unwrap());
+        let (a, b) = (l.track(t[0]).unwrap().unwrap(), l.track(t[1]).unwrap().unwrap());
+        assert_eq!((a.size_bytes, a.content_hash.as_deref()), (10, Some("newer")));
+        assert_eq!((b.size_bytes, b.content_hash.as_deref()), (12, Some("first")));
     }
 }
