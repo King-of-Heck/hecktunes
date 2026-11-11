@@ -147,6 +147,8 @@ export interface SyncOutcome {
   removed: number;
   adopted: number;
   conflicts: string[];
+  /** Library changes noticed during the sync (a file gone or edited). */
+  warnings: string[];
   cancelled: boolean;
 }
 

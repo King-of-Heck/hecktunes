@@ -116,6 +116,7 @@
           {jobs}
           {playlists}
           retryJobId={retryJobs[selected.id] ?? null}
+          {syncing}
           onRetry={() => retry(selected.id)}
           onBack={() => (selectedId = null)}
           onEdit={(t) => (editing = t)}

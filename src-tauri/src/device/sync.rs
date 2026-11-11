@@ -38,6 +38,8 @@ pub struct Outcome {
     /// Card paths left alone because a file HeckTunes doesn't own is in the way, or because the
     /// manifest named a path outside /Music and /Playlists.
     pub conflicts: Vec<String>,
+    /// Things that changed in the library while the sync ran (a file gone, a file edited).
+    pub warnings: Vec<String>,
     pub cancelled: bool,
 }
 
@@ -151,8 +153,26 @@ fn run(
                 outcome.conflicts.push(w.card_path.clone());
             }
         } else {
-            put(&dest, &w.source)?;
-            manifest.files.insert(w.card_path.clone(), FileEntry { size: w.size, hash: w.hash.clone() });
+            let entry = match put(&dest, w)? {
+                Put::SourceGone => {
+                    outcome.warnings.push(format!(
+                        "Skipped {}: its file disappeared from the library during the sync",
+                        w.card_path
+                    ));
+                    bytes_done += w.size;
+                    continue;
+                }
+                Put::Written(actual) => {
+                    if actual.hash != w.hash || actual.size != w.size {
+                        outcome.warnings.push(format!(
+                            "{} changed in the library during the sync; the next sync will check it again",
+                            w.card_path
+                        ));
+                    }
+                    actual
+                }
+            };
+            manifest.files.insert(w.card_path.clone(), entry);
             outcome.copied += 1;
             if outcome.copied % CHECKPOINT_EVERY == 0 {
                 manifest.save(card)?;
@@ -174,20 +194,42 @@ fn temp_name(dest: &Path) -> PathBuf {
     dest.with_file_name(name)
 }
 
-/// Writes `<dest>.hecktmp`, then renames it over `dest` (replacing an older copy).
-fn put(dest: &Path, source: &Source) -> Result<()> {
+enum Put {
+    /// Written; the size and hash of what actually landed on the card.
+    Written(FileEntry),
+    /// The library file was gone by copy time; nothing was written.
+    SourceGone,
+}
+
+/// Writes `<dest>.hecktmp`, then renames it over `dest` (replacing an older copy). A library file
+/// is hashed again as written, since it may have changed after the plan was made.
+fn put(dest: &Path, w: &Wanted) -> Result<Put> {
+    if let Source::File(p) = &w.source {
+        if !p.is_file() {
+            return Ok(Put::SourceGone);
+        }
+    }
     let parent = dest.parent().ok_or_else(|| anyhow!("bad card path {}", dest.display()))?;
     fs::create_dir_all(parent).map_err(|e| anyhow!("couldn't create {}: {e}", parent.display()))?;
     let tmp = temp_name(dest);
-    let written = match source {
-        Source::File(p) => fs::copy(p, &tmp).map(|_| ()),
-        Source::Bytes(b) => fs::write(&tmp, b),
+    let written = match &w.source {
+        Source::File(p) => fs::copy(p, &tmp).and_then(|size| {
+            let hash = file_hash(&tmp).map_err(std::io::Error::other)?;
+            Ok(FileEntry { size, hash })
+        }),
+        Source::Bytes(b) => fs::write(&tmp, b).map(|()| FileEntry { size: w.size, hash: w.hash.clone() }),
     };
-    if let Err(e) = written.and_then(|()| fs::rename(&tmp, dest)) {
-        let _ = fs::remove_file(&tmp);
-        return Err(anyhow!("couldn't write {}: {e}", dest.display()));
+    match written.and_then(|entry| fs::rename(&tmp, dest).map(|()| entry)) {
+        Ok(entry) => Ok(Put::Written(entry)),
+        Err(e) => {
+            let _ = fs::remove_file(&tmp);
+            match &w.source {
+                // Removed between the check above and the copy.
+                Source::File(p) if !p.exists() => Ok(Put::SourceGone),
+                _ => Err(anyhow!("couldn't write {}: {e}", dest.display())),
+            }
+        }
     }
-    Ok(())
 }
 
 /// Removes now-empty folders above a removed file, stopping at /Music, /Playlists and the card root.
@@ -498,5 +540,52 @@ mod tests {
         assert_eq!(out.conflicts, vec![key.to_string()]);
         assert_eq!(fs::read(&outside).unwrap(), b"precious");
         assert!(!Manifest::load(&e.card).unwrap().unwrap().files.contains_key(key));
+    }
+
+    #[test]
+    fn a_library_file_gone_by_copy_time_is_skipped_with_a_warning_and_the_rest_still_syncs() {
+        let e = env();
+        let present = e.src.join("present.flac");
+        fs::write(&present, b"abc").unwrap();
+        let plan = SyncPlan {
+            copies: vec![
+                Wanted { card_path: "Music/A/gone.flac".into(), source: Source::File(e.src.join("gone.flac")), size: 5, hash: "h".into() },
+                Wanted {
+                    card_path: "Music/A/present.flac".into(),
+                    source: Source::File(present.clone()),
+                    size: 3,
+                    hash: file_hash(&present).unwrap(),
+                },
+            ],
+            ..SyncPlan::default()
+        };
+        let mut m = Manifest::new();
+        let out = execute(&e.card, &plan, &mut m, &AtomicBool::new(false), &mut |_| {}).unwrap();
+        assert_eq!(out.copied, 1);
+        assert_eq!(out.warnings.len(), 1);
+        assert!(out.warnings[0].contains("Music/A/gone.flac"), "{:?}", out.warnings);
+        assert!(!on_card(&e.card, "Music/A/gone.flac").exists());
+        assert!(!m.files.contains_key("Music/A/gone.flac"));
+        assert_eq!(fs::read(on_card(&e.card, "Music/A/present.flac")).unwrap(), b"abc");
+        assert!(m.synced_at.is_some());
+    }
+
+    #[test]
+    fn a_file_that_changed_since_planning_is_recorded_as_copied_and_flagged() {
+        let e = env();
+        let src = e.src.join("edited.flac");
+        fs::write(&src, b"new bytes").unwrap(); // the plan still expects the old content
+        let plan = SyncPlan {
+            copies: vec![Wanted { card_path: "Music/A/edited.flac".into(), source: Source::File(src.clone()), size: 3, hash: "old-hash".into() }],
+            ..SyncPlan::default()
+        };
+        let mut m = Manifest::new();
+        let out = execute(&e.card, &plan, &mut m, &AtomicBool::new(false), &mut |_| {}).unwrap();
+        assert_eq!(out.copied, 1);
+        assert_eq!(out.warnings.len(), 1);
+        assert!(out.warnings[0].contains("Music/A/edited.flac"), "{:?}", out.warnings);
+        let entry = &Manifest::load(&e.card).unwrap().unwrap().files["Music/A/edited.flac"];
+        assert_eq!((entry.size, entry.hash.clone()), (9, file_hash(&src).unwrap()));
+        assert_eq!(fs::read(on_card(&e.card, "Music/A/edited.flac")).unwrap(), b"new bytes");
     }
 }

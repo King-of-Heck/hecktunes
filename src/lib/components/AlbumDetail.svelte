@@ -8,6 +8,7 @@
     jobs,
     playlists,
     retryJobId,
+    syncing,
     onRetry,
     onBack,
     onEdit,
@@ -19,6 +20,8 @@
     jobs: Record<number, JobUpdate>;
     playlists: PlaylistRow[];
     retryJobId: number | null;
+    /** A sync is copying library files: hold back changes to them until it ends. */
+    syncing: boolean;
     onRetry: () => Promise<void>;
     onBack: () => void;
     onEdit: (tracks: TrackRow[]) => void;
@@ -78,15 +81,16 @@
       <p class="artist">{album.album_artist}</p>
       <p class="meta">{[album.year, album.genre, `${album.track_count} tracks`].filter(Boolean).join(' · ')}</p>
       <div class="actions">
-        <button onclick={() => onEdit(tracks)}>Edit tags</button>
-        <button onclick={fix} disabled={retrying}>{retrying ? 'Looking up…' : 'Fix metadata'}</button>
+        <button onclick={() => onEdit(tracks)} disabled={syncing}>Edit tags</button>
+        <button onclick={fix} disabled={retrying || syncing}>{retrying ? 'Looking up…' : 'Fix metadata'}</button>
         <AddToPlaylist trackIds={tracks.map((t) => t.id)} {playlists} {onPlaylistsChanged} label="Add to playlist" />
-        {#if !confirming}<button onclick={() => (confirming = true)}>Remove from library</button>{/if}
+        {#if !confirming}<button onclick={() => (confirming = true)} disabled={syncing}>Remove from library</button>{/if}
       </div>
+      {#if syncing}<p class="meta">Editing and removing are paused while the Echo Mini sync runs.</p>{/if}
       {#if confirming}
         <p class="confirm">
           Remove this album and delete its files from the library folder? Your original files aren't touched.
-          <button class="danger" onclick={remove} disabled={removing}>Remove</button>
+          <button class="danger" onclick={remove} disabled={removing || syncing}>Remove</button>
           <button onclick={() => (confirming = false)} disabled={removing}>Cancel</button>
         </p>
       {/if}

@@ -195,6 +195,7 @@
           {o.cancelled ? 'Sync cancelled.' : 'Sync finished.'} Copied {o.copied}, removed {o.removed}{o.adopted ? `, kept ${o.adopted} already there` : ''}.
         </p>
         {#each o.conflicts as c}<p class="warn">Left alone: {c} (HeckTunes didn't put a file there, or its record of it looked wrong).</p>{/each}
+        {#each o.warnings as w}<p class="warn">{w}</p>{/each}
         {#each syncEvent.warnings as w}<p class="warn">{w}</p>{/each}
         {#if echo?.status === 'done'}
           <p class="ok">The player's library is ready, so the Echo Mini won't need to rescan the card.</p>
