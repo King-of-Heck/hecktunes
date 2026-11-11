@@ -1,5 +1,6 @@
 pub mod artwork;
 pub mod commands;
+pub mod device;
 pub mod identify;
 pub mod import;
 pub mod library;
