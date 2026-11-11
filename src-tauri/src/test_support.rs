@@ -194,6 +194,18 @@ pub fn add_memory_album(lib: &mut crate::library::Library, title: &str, artist: 
     (id, ids)
 }
 
+/// Imports a tagged WAV album into `lib` without any metadata lookup. Songs are "Song 1".."Song n",
+/// 1 s each; the library folder is `<artist>/<album>`. Returns the album id.
+pub fn add_album(lib: &mut crate::library::Library, src_parent: &Path, album: &str, artist: &str, n: u32, cover: bool) -> i64 {
+    let src = src_parent.join(format!("src {artist} - {album}"));
+    std::fs::create_dir_all(&src).unwrap();
+    for i in 1..=n {
+        tagged_wav(&src.join(format!("{i}.wav")), 1, &format!("Song {i}"), album, artist, i);
+    }
+    let group = crate::import::scan::scan_paths(&[src]).groups.remove(0);
+    crate::import::apply::apply(lib, &group, None, cover.then(|| png_bytes(64, 64)), false).unwrap()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
