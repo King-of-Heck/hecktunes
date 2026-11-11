@@ -1,7 +1,8 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import * as api from './lib/api';
-  import type { AlbumRow, JobUpdate, PlaylistRow, TrackRow, View } from './lib/types';
+  import type { AlbumRow, JobUpdate, PlaylistRow, SyncEvent, TrackRow, View } from './lib/types';
+  import SyncPanel from './lib/components/SyncPanel.svelte';
   import ReleasePicker from './lib/components/ReleasePicker.svelte';
   import TagEditor from './lib/components/TagEditor.svelte';
   import Sidebar from './lib/components/Sidebar.svelte';
@@ -24,6 +25,8 @@
   let songsVersion = $state(0);
   // album id -> id of its running Fix-metadata job; lives here so it survives AlbumDetail remounts.
   let retryJobs = $state<Record<number, number>>({});
+  let syncEvent = $state<SyncEvent | null>(null);
+  const syncing = $derived(syncEvent !== null && syncEvent.state !== 'finished' && syncEvent.state !== 'failed');
 
   const needs = $derived(albums.filter((a) => a.needs_metadata));
   const artistName = $derived(view.kind === 'artists' ? (view.artist ?? null) : null);
@@ -92,6 +95,7 @@
     refreshPlaylists().catch(logError('playlists failed'));
     const unlisten = [
       api.onImportJob(onJob),
+      api.onSync((e) => (syncEvent = e)),
       api.onFileDrop({
         hover: (on) => (hovering = on),
         drop: (paths) => api.importPaths(paths).catch(logError('import failed')),
@@ -102,7 +106,7 @@
 </script>
 
 <div class="layout">
-  <Sidebar {view} needsCount={needs.length} {playlists} syncing={false} onSelect={select} onCreatePlaylist={createPlaylist} />
+  <Sidebar {view} needsCount={needs.length} {playlists} {syncing} onSelect={select} onCreatePlaylist={createPlaylist} />
   <main>
     {#if selected}
       {#key selected.id}
@@ -142,7 +146,7 @@
         {/key}
       {/if}
     {:else if view.kind === 'device'}
-      <p class="placeholder">Echo Mini sync arrives in a later task.</p>
+      <SyncPanel {albums} {playlists} {syncEvent} onClearResult={() => (syncEvent = null)} />
     {:else}
       {#if artistName !== null}
         <div class="crumbs">
@@ -171,5 +175,4 @@
   .crumbs { padding: 16px 24px 0; }
   .crumbs h2 { margin: 4px 0 0; font-size: 22px; }
   .back { border: none; background: none; color: var(--accent); padding: 0; }
-  .placeholder { padding: 24px; color: var(--muted); }
 </style>
