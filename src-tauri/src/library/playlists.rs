@@ -131,17 +131,16 @@ impl Library {
         if exists.is_none() {
             bail!("playlist {id} not found");
         }
-        let mut next: i64 = tx.query_row(
+        let start: i64 = tx.query_row(
             "SELECT COALESCE(MAX(position) + 1, 0) FROM playlist_items WHERE playlist_id = ?1",
             [id],
             |r| r.get(0),
         )?;
-        for track in track_ids {
+        for (offset, track) in track_ids.iter().enumerate() {
             tx.execute(
                 "INSERT INTO playlist_items (playlist_id, track_id, position) VALUES (?1, ?2, ?3)",
-                params![id, track, next],
+                params![id, track, start + offset as i64],
             )?;
-            next += 1;
         }
         tx.commit()?;
         Ok(())
