@@ -1,12 +1,18 @@
+use crate::device::detect::{self, Volume};
+use crate::device::plan::PlanSummary;
+use crate::device::service::SyncService;
 use crate::import::jobs::{Command, ImportQueue, JobChoice};
-use crate::library::{editing, AlbumEdit, AlbumRow, Library, TrackEdit, TrackRow};
+use crate::library::{
+    editing, AlbumEdit, AlbumRow, Library, PlaylistEntry, PlaylistRow, Selection, SelectionKind, SongRow, TrackEdit, TrackRow,
+};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use tauri::State;
+use tauri::{AppHandle, Emitter, State};
 
 pub struct AppState {
     pub lib: Arc<Mutex<Library>>,
     pub queue: ImportQueue,
+    pub sync: SyncService,
 }
 
 // Every command is `async` so Tauri runs it off the main (UI) thread: several block on the
@@ -52,4 +58,91 @@ pub fn update_album(state: State<AppState>, album_id: i64, edit: AlbumEdit) -> C
 #[tauri::command(async)]
 pub fn update_track(state: State<AppState>, track_id: i64, edit: TrackEdit) -> CmdResult<()> {
     editing::apply_track_edit(&mut state.lib.lock().unwrap(), track_id, &edit).map_err(err)
+}
+
+#[tauri::command(async)]
+pub fn list_songs(state: State<AppState>) -> CmdResult<Vec<SongRow>> {
+    state.lib.lock().unwrap().list_songs().map_err(err)
+}
+
+/// Removes the album from the library and deletes its folder in the library root.
+#[tauri::command(async)]
+pub fn delete_album(state: State<AppState>, album_id: i64) -> CmdResult<()> {
+    state.lib.lock().unwrap().delete_album(album_id, true).map_err(err)
+}
+
+#[tauri::command(async)]
+pub fn list_playlists(state: State<AppState>) -> CmdResult<Vec<PlaylistRow>> {
+    state.lib.lock().unwrap().list_playlists().map_err(err)
+}
+
+#[tauri::command(async)]
+pub fn create_playlist(state: State<AppState>, name: String) -> CmdResult<i64> {
+    state.lib.lock().unwrap().create_playlist(&name).map_err(err)
+}
+
+#[tauri::command(async)]
+pub fn rename_playlist(state: State<AppState>, playlist_id: i64, name: String) -> CmdResult<()> {
+    state.lib.lock().unwrap().rename_playlist(playlist_id, &name).map_err(err)
+}
+
+#[tauri::command(async)]
+pub fn delete_playlist(state: State<AppState>, playlist_id: i64) -> CmdResult<()> {
+    state.lib.lock().unwrap().delete_playlist(playlist_id).map_err(err)
+}
+
+#[tauri::command(async)]
+pub fn playlist_entries(state: State<AppState>, playlist_id: i64) -> CmdResult<Vec<PlaylistEntry>> {
+    state.lib.lock().unwrap().playlist_entries(playlist_id).map_err(err)
+}
+
+#[tauri::command(async)]
+pub fn add_to_playlist(state: State<AppState>, playlist_id: i64, track_ids: Vec<i64>) -> CmdResult<()> {
+    state.lib.lock().unwrap().add_to_playlist(playlist_id, &track_ids).map_err(err)
+}
+
+#[tauri::command(async)]
+pub fn remove_playlist_items(state: State<AppState>, playlist_id: i64, item_ids: Vec<i64>) -> CmdResult<()> {
+    state.lib.lock().unwrap().remove_playlist_items(playlist_id, &item_ids).map_err(err)
+}
+
+#[tauri::command(async)]
+pub fn move_playlist_item(state: State<AppState>, playlist_id: i64, item_id: i64, to_index: usize) -> CmdResult<()> {
+    state.lib.lock().unwrap().move_playlist_item(playlist_id, item_id, to_index).map_err(err)
+}
+
+#[tauri::command(async)]
+pub fn get_selection(state: State<AppState>) -> CmdResult<Selection> {
+    state.lib.lock().unwrap().selection().map_err(err)
+}
+
+#[tauri::command(async)]
+pub fn set_selected(state: State<AppState>, kind: SelectionKind, reference: String, on: bool) -> CmdResult<()> {
+    state.lib.lock().unwrap().set_selected(kind, &reference, on).map_err(err)
+}
+
+#[tauri::command(async)]
+pub fn list_volumes() -> Vec<Volume> {
+    detect::list_volumes()
+}
+
+#[tauri::command(async)]
+pub fn preview_sync(state: State<AppState>, card: String) -> CmdResult<PlanSummary> {
+    state.sync.preview(&PathBuf::from(card)).map_err(err)
+}
+
+/// Starts a sync in the background; progress arrives as "sync" events.
+#[tauri::command(async)]
+pub fn start_sync(app: AppHandle, state: State<AppState>, card: String) -> CmdResult<()> {
+    state
+        .sync
+        .start(PathBuf::from(card), move |event| {
+            let _ = app.emit("sync", event);
+        })
+        .map_err(err)
+}
+
+#[tauri::command(async)]
+pub fn cancel_sync(state: State<AppState>) {
+    state.sync.cancel();
 }

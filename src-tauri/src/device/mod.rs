@@ -5,6 +5,7 @@ pub mod echosync;
 pub mod m3u;
 pub mod manifest;
 pub mod plan;
+pub mod service;
 pub mod sync;
 
 use crate::library::Library;

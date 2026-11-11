@@ -11,6 +11,7 @@ pub mod tags;
 mod test_support;
 
 use commands::AppState;
+use device::service::SyncService;
 use identify::{MetadataSource, OnlineSource};
 use import::jobs::ImportQueue;
 use library::Library;
@@ -41,7 +42,8 @@ pub fn run() {
             let queue = ImportQueue::start(lib.clone(), source, move |update| {
                 let _ = handle.emit("import-job", update);
             });
-            app.manage(AppState { lib, queue });
+            let sync = SyncService::new(lib.clone(), device::echosync::sidecar_path());
+            app.manage(AppState { lib, queue, sync });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -52,6 +54,22 @@ pub fn run() {
             commands::retry_metadata,
             commands::update_album,
             commands::update_track,
+            commands::list_songs,
+            commands::delete_album,
+            commands::list_playlists,
+            commands::create_playlist,
+            commands::rename_playlist,
+            commands::delete_playlist,
+            commands::playlist_entries,
+            commands::add_to_playlist,
+            commands::remove_playlist_items,
+            commands::move_playlist_item,
+            commands::get_selection,
+            commands::set_selected,
+            commands::list_volumes,
+            commands::preview_sync,
+            commands::start_sync,
+            commands::cancel_sync,
         ])
         .run(tauri::generate_context!())
         .expect("error while running HeckTunes");
