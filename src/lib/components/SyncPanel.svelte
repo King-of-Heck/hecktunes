@@ -18,6 +18,8 @@
   let actionError = $state<string | null>(null);
   let expanded = $state<Record<string, boolean>>({});
   let previewSeq = 0;
+  // Sync was pressed and its first event hasn't arrived yet.
+  let starting = $state(false);
 
   const running = $derived(syncEvent !== null && syncEvent.state !== 'finished' && syncEvent.state !== 'failed');
   const selectedVolume = $derived(volumes.find((v) => v.root === card) ?? null);
@@ -51,11 +53,12 @@
   $effect(() => {
     const c = card;
     void selection;
+    // Bump first, so a preview still in flight can't land after this point.
+    const seq = ++previewSeq;
     if (c === null || running) {
       summary = null;
       return;
     }
-    const seq = ++previewSeq;
     previewError = null;
     api
       .previewSync(c)
@@ -68,6 +71,10 @@
           previewError = String(e);
         }
       });
+  });
+
+  $effect(() => {
+    if (syncEvent !== null) starting = false;
   });
 
   // A finished sync changes "last synced" and free space.
@@ -86,13 +93,24 @@
   }
 
   async function sync() {
-    if (card === null) return;
+    if (card === null || starting) return;
     actionError = null;
+    starting = true;
     onClearResult();
     try {
       await api.startSync(card);
     } catch (e) {
+      starting = false;
       actionError = String(e);
+    }
+  }
+
+  async function cancel() {
+    actionError = null;
+    try {
+      await api.cancelSync();
+    } catch (e) {
+      actionError = `Couldn't cancel: ${e}`;
     }
   }
 </script>
@@ -173,7 +191,7 @@
       {/if}
       {#if !summary.fits}<p class="err">Not enough space on the card. Untick something or free up space first.</p>{/if}
       {#each summary.warnings as w}<p class="warn">{w}</p>{/each}
-      <button class="primary" onclick={sync} disabled={!summary.fits}>Sync</button>
+      <button class="primary" onclick={sync} disabled={!summary.fits || starting}>{starting ? 'Starting…' : 'Sync'}</button>
     {/if}
     {#if actionError}<p class="err">{actionError}</p>{/if}
   </section>
@@ -185,10 +203,10 @@
       {:else if syncEvent.state === 'progress'}
         <p>{syncEvent.phase === 'removing' ? 'Removing' : 'Copying'} {syncEvent.done + 1} of {syncEvent.total}: {syncEvent.current}</p>
         <progress max={syncEvent.bytes_total || syncEvent.total || 1} value={syncEvent.bytes_total ? syncEvent.bytes_done : syncEvent.done}></progress>
-        <button onclick={() => api.cancelSync()}>Cancel</button>
+        <button onclick={cancel}>Cancel</button>
       {:else if syncEvent.state === 'echo_sync'}
         <p>Building the player's library (echo-sync)… this can take a minute.</p>
-        <button onclick={() => api.cancelSync()}>Cancel</button>
+        <button onclick={cancel}>Cancel</button>
       {:else if syncEvent.state === 'finished'}
         {@const o = syncEvent.outcome}
         {@const echo = syncEvent.echo_sync}

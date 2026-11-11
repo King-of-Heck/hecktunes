@@ -1,4 +1,4 @@
-use super::cardpath::{fold_key, playlist_card_path, track_card_path};
+use super::cardpath::{fold_key, is_safe_card_path, playlist_card_path, track_card_path};
 use super::m3u::{render, M3uEntry};
 use super::manifest::{FileEntry, Manifest};
 use crate::library::hash::{bytes_hash, file_hash};
@@ -170,8 +170,12 @@ pub fn diff(mut wanted: Vec<Wanted>, manifest: &Manifest, warnings: Vec<String>)
     let mut plan = SyncPlan { warnings, ..Default::default() };
     for (path, entry) in &manifest.files {
         if !keep.contains(path) {
+            // Unsafe paths stay listed so the executor reports them, but they are never deleted,
+            // so they free nothing.
             plan.removals.push(path.clone());
-            plan.bytes_freed += entry.size;
+            if is_safe_card_path(path) {
+                plan.bytes_freed += entry.size;
+            }
         }
     }
     for w in wanted {
@@ -354,5 +358,16 @@ mod tests {
         let s = plan.summary(None, true);
         assert!(s.fits && s.first_sync && s.available.is_none());
         assert!(!plan.summary(Some(needed - 1), false).fits);
+    }
+
+    #[test]
+    fn unsafe_manifest_paths_are_listed_for_removal_but_free_no_space() {
+        let mut m = Manifest::new();
+        m.files.insert("Music/../../outside.flac".into(), FileEntry { size: 1000, hash: "x".into() });
+        m.files.insert(".echo/favorites.bin".into(), FileEntry { size: 500, hash: "y".into() });
+        m.files.insert("Music/stale.flac".into(), FileEntry { size: 7, hash: "z".into() });
+        let plan = diff(vec![], &m, vec![]);
+        assert_eq!(plan.removals.len(), 3);
+        assert_eq!(plan.bytes_freed, 7);
     }
 }

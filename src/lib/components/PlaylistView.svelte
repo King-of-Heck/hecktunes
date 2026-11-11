@@ -19,11 +19,14 @@
 
   const total = $derived(entries.reduce((sum, e) => sum + e.duration_ms, 0));
 
-  async function load() {
+  /** Reloads the entries; false (with `error` set) when that failed. */
+  async function load(): Promise<boolean> {
     try {
       entries = await api.playlistEntries(playlist.id);
+      return true;
     } catch (e) {
       error = String(e);
+      return false;
     }
   }
   onMount(load);
@@ -34,9 +37,9 @@
     error = null;
     try {
       await action();
-      await load();
+      const reloaded = await load();
       await onChanged();
-      return true;
+      return reloaded;
     } catch (e) {
       error = String(e);
       return false;
