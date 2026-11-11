@@ -107,7 +107,7 @@ fn run(lib: &Mutex<Library>, card: &Path, echo: Option<&Path>, cancel: &AtomicBo
     } else {
         notify(SyncEvent::EchoSync);
         Some(match echo {
-            Some(exe) => echosync::run(exe, card),
+            Some(exe) => echosync::run(exe, card, cancel),
             None => EchoSyncOutcome::Missing { reason: "echo-sync isn't installed next to HeckTunes".into() },
         })
     };

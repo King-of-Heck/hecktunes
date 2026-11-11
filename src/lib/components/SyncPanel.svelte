@@ -188,6 +188,7 @@
         <button onclick={() => api.cancelSync()}>Cancel</button>
       {:else if syncEvent.state === 'echo_sync'}
         <p>Building the player's library (echo-sync)… this can take a minute.</p>
+        <button onclick={() => api.cancelSync()}>Cancel</button>
       {:else if syncEvent.state === 'finished'}
         {@const o = syncEvent.outcome}
         {@const echo = syncEvent.echo_sync}
