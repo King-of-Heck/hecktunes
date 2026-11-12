@@ -5,6 +5,7 @@ pub mod identify;
 pub mod import;
 pub mod library;
 pub mod model;
+pub mod player;
 pub mod settings;
 pub mod tags;
 #[cfg(test)]
@@ -43,7 +44,14 @@ pub fn run() {
                 let _ = handle.emit("import-job", update);
             });
             let sync = SyncService::new(lib.clone(), device::echosync::sidecar_path());
-            app.manage(AppState { lib, queue, sync });
+            let player_handle = app.handle().clone();
+            let player = player::PlayerService::start(
+                || Ok(Box::new(player::RodioAudio::open()?) as Box<dyn player::Audio>),
+                move |status| {
+                    let _ = player_handle.emit("player", status);
+                },
+            );
+            app.manage(AppState { lib, queue, sync, player });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -70,6 +78,11 @@ pub fn run() {
             commands::preview_sync,
             commands::start_sync,
             commands::cancel_sync,
+            commands::player_play,
+            commands::player_pause,
+            commands::player_resume,
+            commands::player_seek,
+            commands::player_stop,
         ])
         .run(tauri::generate_context!())
         .expect("error while running HeckTunes");

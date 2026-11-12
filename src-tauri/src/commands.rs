@@ -13,6 +13,7 @@ pub struct AppState {
     pub lib: Arc<Mutex<Library>>,
     pub queue: ImportQueue,
     pub sync: SyncService,
+    pub player: crate::player::PlayerService,
 }
 
 // Every command is `async` so Tauri runs it off the main (UI) thread: several block on the
@@ -145,4 +146,32 @@ pub fn start_sync(app: AppHandle, state: State<AppState>, card: String) -> CmdRe
 #[tauri::command(async)]
 pub fn cancel_sync(state: State<AppState>) {
     state.sync.cancel();
+}
+
+/// Starts previewing a library track; status arrives as "player" events.
+#[tauri::command(async)]
+pub fn player_play(state: State<AppState>, track_id: i64) -> CmdResult<()> {
+    let track = state.lib.lock().unwrap().track(track_id).map_err(err)?.ok_or_else(|| format!("track {track_id} not found"))?;
+    state.player.play(track.id, track.file_path, track.duration_ms);
+    Ok(())
+}
+
+#[tauri::command(async)]
+pub fn player_pause(state: State<AppState>) {
+    state.player.pause();
+}
+
+#[tauri::command(async)]
+pub fn player_resume(state: State<AppState>) {
+    state.player.resume();
+}
+
+#[tauri::command(async)]
+pub fn player_seek(state: State<AppState>, position_ms: u64) {
+    state.player.seek(position_ms);
+}
+
+#[tauri::command(async)]
+pub fn player_stop(state: State<AppState>) {
+    state.player.stop();
 }
