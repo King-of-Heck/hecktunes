@@ -1,7 +1,7 @@
 <script lang="ts">
   import { updateAlbum, updateTrack } from '../api';
   import type { AlbumRow, TrackRow } from '../types';
-  let { album, tracks, onClose }: { album: AlbumRow; tracks: TrackRow[]; onClose: (changed: boolean) => void } = $props();
+  let { album, tracks, syncing, onClose }: { album: AlbumRow; tracks: TrackRow[]; syncing: boolean; onClose: (changed: boolean) => void } = $props();
 
   // Initial values only: the editor is mounted fresh for each edit session.
   // svelte-ignore state_referenced_locally
@@ -53,9 +53,10 @@
       </tbody>
     </table>
     {#if error}<p class="error">{error}</p>{/if}
+    {#if syncing}<p class="note">Saving is paused while the Echo Mini sync runs.</p>{/if}
     <div class="footer">
       <button onclick={() => onClose(false)} disabled={saving}>Cancel</button>
-      <button class="primary" onclick={save} disabled={saving}>{saving ? 'Saving…' : 'Save'}</button>
+      <button class="primary" onclick={save} disabled={saving || syncing}>{saving ? 'Saving…' : 'Save'}</button>
     </div>
   </div>
 </div>
@@ -71,5 +72,6 @@
   td { padding: 3px 4px; }
   td.n { width: 64px; }
   .error { color: var(--danger); }
+  .note { color: var(--muted); font-size: 13px; }
   .footer { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
 </style>

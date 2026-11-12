@@ -46,11 +46,12 @@
     removeError = null;
     try {
       await deleteAlbum(album.id);
-      await onRemoved();
     } catch (e) {
       removeError = `Couldn't remove: ${e}`;
       removing = false;
+      return;
     }
+    await onRemoved().catch((e) => console.error('refresh after remove failed', e));
   }
 
   const terminal = (st: string) => st === 'done' || st === 'failed' || st === 'skipped';
@@ -79,7 +80,7 @@
 </script>
 
 <div class="detail">
-  <button class="back" onclick={onBack}>← Albums</button>
+  <button class="back" onclick={onBack}>← Back</button>
   <header>
     {#if album.cover_path}<img src={coverUrl(album.cover_path, bust)} alt="" />{:else}<div class="noart">♪</div>{/if}
     <div>

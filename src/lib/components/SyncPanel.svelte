@@ -15,6 +15,7 @@
   let selection = $state<Selection>({ albums: [], artists: [], playlists: [] });
   let summary = $state<PlanSummary | null>(null);
   let previewError = $state<string | null>(null);
+  let volumeError = $state<string | null>(null);
   let actionError = $state<string | null>(null);
   let expanded = $state<Record<string, boolean>>({});
   let previewSeq = 0;
@@ -36,11 +37,12 @@
   const hasPlaylist = (id: number) => selection.playlists.includes(id);
 
   async function loadVolumes() {
+    volumeError = null;
     try {
       volumes = await api.listVolumes();
       if (card === null || !volumes.some((v) => v.root === card)) card = volumes.find((v) => v.hecktunes_card)?.root ?? null;
     } catch (e) {
-      previewError = String(e);
+      volumeError = String(e);
     }
   }
 
@@ -130,6 +132,7 @@
       </select>
       <button onclick={loadVolumes} disabled={running}>Refresh</button>
     </div>
+    {#if volumeError}<p class="err">{volumeError}</p>{/if}
     {#if volumes.length === 0}
       <p class="meta">No cards found. Put the microSD card in a card reader (or connect the Echo Mini), then press Refresh.</p>
     {/if}
@@ -218,6 +221,11 @@
         {#each syncEvent.warnings as w}<p class="warn">{w}</p>{/each}
         {#if echo?.status === 'done'}
           <p class="ok">The player's library is ready, so the Echo Mini won't need to rescan the card.</p>
+        {:else if echo?.status === 'failed' && echo.code === null && echo.log.startsWith('cancelled')}
+          <p class="warn">You stopped echo-sync. The Echo Mini will rescan the card on its own.</p>
+        {:else if echo?.status === 'failed' && echo.code === null && echo.log.startsWith('timed out')}
+          <p class="warn">echo-sync took too long and was stopped. The Echo Mini will rescan the card on its own.</p>
+          <pre>{echo.log}</pre>
         {:else if echo?.status === 'failed'}
           <p class="warn">echo-sync failed (exit code {echo.code ?? '?'}). The Echo Mini will rescan the card on its own.</p>
           <pre>{echo.log}</pre>

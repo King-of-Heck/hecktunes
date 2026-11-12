@@ -53,7 +53,7 @@
   {#if naming}
     <form onsubmit={create}>
       <!-- svelte-ignore a11y_autofocus -->
-      <input bind:value={name} placeholder="Playlist name" autofocus onkeydown={(e) => e.key === 'Escape' && (naming = false)} />
+      <input bind:value={name} placeholder="Playlist name" autofocus onkeydown={(e) => { if (e.key === 'Escape') { naming = false; name = ''; error = null; } }} />
     </form>
     {#if error}<p class="err">{error}</p>{/if}
   {:else}

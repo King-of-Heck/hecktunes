@@ -85,7 +85,7 @@
     {#if renaming}
       <form onsubmit={rename}>
         <!-- svelte-ignore a11y_autofocus -->
-        <input bind:value={name} autofocus />
+        <input bind:value={name} autofocus onkeydown={(e) => e.key === 'Escape' && (renaming = false)} />
         <button type="submit" disabled={busy}>Save</button>
         <button type="button" onclick={() => (renaming = false)}>Cancel</button>
       </form>

@@ -26,11 +26,14 @@
   $effect(() => {
     void version; // reload after imports and edits
     let cancelled = false;
+    error = null;
     listSongs()
       .then((s) => {
         if (!cancelled) songs = s;
       })
-      .catch((e) => (error = String(e)));
+      .catch((e) => {
+        if (!cancelled) error = String(e);
+      });
     return () => {
       cancelled = true;
     };

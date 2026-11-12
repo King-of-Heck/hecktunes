@@ -39,6 +39,9 @@
   const gridAlbums = $derived(
     view.kind === 'needs_metadata' ? needs : artistName !== null ? albums.filter((a) => a.album_artist === artistName) : albums,
   );
+  $effect(() => {
+    if (artistName !== null && albums.length > 0 && !albums.some((a) => a.album_artist === artistName)) view = { kind: 'artists' };
+  });
   const selected = $derived(albums.find((a) => a.id === selectedId) ?? null);
   const jobList = $derived(Object.values(jobs).sort((a, b) => b.job_id - a.job_id));
 
@@ -224,11 +227,11 @@
 <ImportTray jobs={jobList} raised={nowPlaying !== null} onClear={clearFinished} />
 {#if waiting}
   {#key waiting.job_id}
-    <ReleasePicker job={waiting} />
+    <ReleasePicker job={waiting} {syncing} />
   {/key}
 {/if}
 {#if editing && selected}
-  <TagEditor album={selected} tracks={editing} onClose={(changed) => { editing = null; if (changed) refresh().catch(logError('refresh failed')); }} />
+  <TagEditor album={selected} tracks={editing} {syncing} onClose={(changed) => { editing = null; if (changed) refresh().catch(logError('refresh failed')); }} />
 {/if}
 
 <style>

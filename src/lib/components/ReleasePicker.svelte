@@ -1,7 +1,7 @@
 <script lang="ts">
   import { formatDuration, resolveJob } from '../api';
   import type { JobChoice, JobUpdate, ReleaseCandidate } from '../types';
-  let { job }: { job: JobUpdate & ({ state: 'needs_choice' } | { state: 'duplicate' }) } = $props();
+  let { job, syncing }: { job: JobUpdate & ({ state: 'needs_choice' } | { state: 'duplicate' }); syncing: boolean } = $props();
 
   // App.svelte wraps this component in {#key job_id}, so initial values are per job.
   // svelte-ignore state_referenced_locally
@@ -33,9 +33,10 @@
     {#if job.state === 'duplicate'}
       <h3 id="picker-title">Already in your library</h3>
       <p><strong>{job.release.artist} – {job.release.title}</strong> ({job.release.date ?? 'unknown year'}) is already in your library.</p>
+      {#if syncing}<p class="note">Waiting for the Echo Mini sync to finish before changing your library.</p>{/if}
       <div class="footer">
         <button onclick={() => choose({ kind: 'skip' })} disabled={busy}>Skip</button>
-        <button class="primary" onclick={() => choose({ kind: 'replace' })} disabled={busy}>Replace existing</button>
+        <button class="primary" onclick={() => choose({ kind: 'replace' })} disabled={busy || syncing}>Replace existing</button>
       </div>
     {:else}
       <h3 id="picker-title">Which release is “{job.label}”?</h3>
@@ -56,15 +57,16 @@
                 <ol>{#each c.tracks as t}<li>{t.title} <span class="muted">{t.length_ms ? formatDuration(t.length_ms) : ''}</span></li>{/each}</ol>
               {/if}
             </div>
-            <button class="primary" onclick={() => choose({ kind: 'pick', mbid: c.mbid })} disabled={busy}>Use this</button>
+            <button class="primary" onclick={() => choose({ kind: 'pick', mbid: c.mbid })} disabled={busy || syncing}>Use this</button>
           </li>
         {:else}
           <li class="muted">No releases found. Try a different search.</li>
         {/each}
       </ul>
+      {#if syncing}<p class="note">Waiting for the Echo Mini sync to finish before changing your library.</p>{/if}
       <div class="footer">
         <button onclick={() => choose({ kind: 'skip' })} disabled={busy}>Don't import</button>
-        <button onclick={() => choose({ kind: 'keep_existing' })} disabled={busy}>Keep existing tags</button>
+        <button onclick={() => choose({ kind: 'keep_existing' })} disabled={busy || syncing}>Keep existing tags</button>
       </div>
     {/if}
   </div>
@@ -82,5 +84,6 @@
   .muted { color: var(--muted); font-size: 12px; }
   .link { border: none; background: none; color: var(--accent); padding: 0; text-align: left; font-size: 12px; }
   ol { margin: 6px 0 0; padding-left: 20px; font-size: 12px; }
+  .note { color: var(--muted); font-size: 13px; }
   .footer { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
 </style>

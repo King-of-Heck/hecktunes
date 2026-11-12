@@ -9,6 +9,10 @@
   }: { trackIds: number[]; playlists: PlaylistRow[]; onPlaylistsChanged: () => Promise<void>; label?: string } = $props();
 
   let open = $state(false);
+  let root = $state<HTMLDetailsElement | null>(null);
+  function onWindowClick(e: MouseEvent) {
+    if (open && root && !root.contains(e.target as Node)) open = false;
+  }
   let name = $state('');
   let error = $state<string | null>(null);
 
@@ -38,7 +42,9 @@
   }
 </script>
 
-<details class="menu" bind:open>
+<svelte:window onclick={onWindowClick} onkeydown={(e) => e.key === 'Escape' && (open = false)} />
+
+<details class="menu" bind:open bind:this={root}>
   <summary title="Add to playlist">{label}</summary>
   <div class="pop">
     <p class="head">Add to playlist</p>
