@@ -1,0 +1,56 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            bundles: msi
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            bundles: dmg
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            bundles: dmg
+    runs-on: ${{ matrix.os }}
+    env:
+      # Baked into the app at build time; both are optional.
+      HECKTUNES_ACOUSTID_KEY: ${{ secrets.HECKTUNES_ACOUSTID_KEY }}
+      HECKTUNES_CONTACT: ${{ github.server_url }}/${{ github.repository }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      - run: npm ci
+      - name: Fetch echo-sync for the target (binary + licence, checksum-verified)
+        run: node scripts/fetch-echo-sync.mjs --target ${{ matrix.target }}
+      - name: Third-party notices for the target
+        run: node scripts/third-party-notices.mjs --target ${{ matrix.target }}
+      - uses: tauri-apps/tauri-action@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: HeckTunes ${{ github.ref_name }}
+          releaseBody: Unsigned builds. See the README for how to open them on Windows and macOS.
+          releaseDraft: true
+          prerelease: false
+          args: --target ${{ matrix.target }} --bundles ${{ matrix.bundles }}

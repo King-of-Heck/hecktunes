@@ -1,47 +1,40 @@
-# Svelte + TS + Vite
+# HeckTunes
 
-This template should help get you started developing with Svelte and TypeScript in Vite.
+A small desktop app that acts as iTunes for a Snowsky Echo Mini running [EchoPod](https://github.com/BasilSkyWalk/echopod) firmware.
 
-## Recommended IDE Setup
+- Drag albums onto the window: HeckTunes copies them into its library folder and fixes their tags and album art (MusicBrainz, Cover Art Archive, optionally AcoustID). Your original files are never changed.
+- Browse by album, artist or song; make playlists; preview tracks.
+- Tick albums, artists and playlists for the Echo Mini and sync them to its microSD card. HeckTunes only ever changes files it put there, and runs echo-sync afterwards so the player doesn't have to rescan.
 
-[VS Code](https://code.visualstudio.com/) + [Svelte](https://marketplace.visualstudio.com/items?itemName=svelte.svelte-vscode).
+## Install
 
-## Need an official Svelte framework?
+Download the installer for your computer from the [Releases](../../releases) page:
 
-Check out [SvelteKit](https://github.com/sveltejs/kit#readme), which is also powered by Vite. Deploy anywhere with its serverless-first approach and adapt to various platforms, with out of the box support for TypeScript, SCSS, and Less, and easily-added support for mdsvex, GraphQL, PostCSS, Tailwind CSS, and more.
+- **Windows:** `HeckTunes_x.y.z_x64_en-US.msi`. The build isn't signed, so Windows SmartScreen may warn you: choose **More info → Run anyway**.
+- **macOS (Apple silicon or Intel):** the matching `.dmg`. The build isn't signed, so the first time **right-click the app → Open → Open**.
 
-## Technical considerations
+## First run
 
-**Why use this over SvelteKit?**
+1. Drop an album folder anywhere in the window.
+2. If HeckTunes isn't sure which release it is, it asks you to pick.
+3. Open **Echo Mini** in the sidebar, choose the microSD card (in a card reader, or the player connected over USB), tick what you want, and press **Sync**. Eject the card safely afterwards.
 
-- It brings its own routing solution which might not be preferable for some users.
-- It is first and foremost a framework that just happens to use Vite under the hood, not a Vite app.
+Untagged albums can be recognised by sound if an AcoustID key is set: get a free one at https://acoustid.org/new-application and paste it in **Settings**.
 
-This template contains as little as possible to get started with Vite + TypeScript + Svelte, while taking into account the developer experience with regards to HMR and intellisense. It demonstrates capabilities on par with the other `create-vite` templates and is a good starting point for beginners dipping their toes into a Vite + Svelte project.
+## Develop
 
-Should you later need the extended capabilities and extensibility provided by SvelteKit, the template has been structured similarly to SvelteKit so that it is easy to migrate.
+Requirements: Node 24, Rust (stable), and the [Tauri prerequisites](https://tauri.app/start/prerequisites/) for your OS.
 
-**Why `global.d.ts` instead of `compilerOptions.types` inside `jsconfig.json` or `tsconfig.json`?**
-
-Setting `compilerOptions.types` shuts out all other types not explicitly listed in the configuration. Using triple-slash references keeps the default TypeScript setting of accepting type information from the entire workspace, while also adding `svelte` and `vite/client` type information.
-
-**Why include `.vscode/extensions.json`?**
-
-Other templates indirectly recommend extensions via the README, but this file allows VS Code to prompt the user to install the recommended extension upon opening the project.
-
-**Why enable `allowJs` in the TS template?**
-
-While `allowJs: false` would indeed prevent the use of `.js` files in the project, it does not prevent the use of JavaScript syntax in `.svelte` files. In addition, it would force `checkJs: false`, bringing the worst of both worlds: not being able to guarantee the entire codebase is TypeScript, and also having worse typechecking for the existing JavaScript. In addition, there are valid use cases in which a mixed codebase may be relevant.
-
-**Why is HMR not preserving my local component state?**
-
-HMR state preservation comes with a number of gotchas! It has been disabled by default in both `svelte-hmr` and `@sveltejs/vite-plugin-svelte` due to its often surprising behavior. You can read the details [here](https://github.com/rixo/svelte-hmr#svelte-hmr).
-
-If you have state that's important to retain within a component, consider creating an external store which would not be replaced by HMR.
-
-```ts
-// store.ts
-// An extremely simple external store
-import { writable } from 'svelte/store'
-export default writable(0)
+```bash
+npm install          # also fetches echo-sync (checksum-verified)
+npm run sidecar      # re-run if the echo-sync download failed
+npx tauri dev
 ```
+
+Checks: `npm run check`, `npm run build`, `cd src-tauri && cargo test`. Regenerate `src-tauri/licenses/THIRD_PARTY_NOTICES.md` with `npm run notices` after changing dependencies.
+
+Releases: push a tag like `v0.1.0`; GitHub Actions builds the installers into a draft release. Optional repository secret: `HECKTUNES_ACOUSTID_KEY`.
+
+## Licences
+
+echo-sync (bundled as a separate program) is GPLv3; its licence and a link to its source are in **About**, along with the licences of the open-source components HeckTunes is built from. HeckTunes' own licence hasn't been chosen yet.

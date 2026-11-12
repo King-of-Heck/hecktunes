@@ -1,10 +1,8 @@
 [package]
 name = "hecktunes"
 version = "0.1.0"
-description = "A Tauri App"
-authors = ["you"]
-license = ""
-repository = ""
+description = "Music library and Echo Mini sync"
+authors = ["HeckTunes contributors"]
 edition = "2024"
 rust-version = "1.90"
 
