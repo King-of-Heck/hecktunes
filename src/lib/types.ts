@@ -171,3 +171,21 @@ export type View =
   | { kind: 'needs_metadata' }
   | { kind: 'playlist'; id: number }
   | { kind: 'device' };
+
+export type PlayState = 'idle' | 'playing' | 'paused' | 'ended' | 'error';
+
+export interface PlayerStatus {
+  state: PlayState;
+  track_id: number | null;
+  position_ms: number;
+  duration_ms: number;
+  error: string | null;
+}
+
+/** A song in the list playback was started from (for the bar's title and next/previous). */
+export interface QueueItem {
+  id: number;
+  title: string;
+  artist: string;
+  album_title: string;
+}

@@ -2,13 +2,22 @@
   import { onMount } from 'svelte';
   import * as api from '../api';
   import { formatDuration } from '../api';
-  import type { PlaylistEntry, PlaylistRow } from '../types';
+  import type { PlaylistEntry, PlaylistRow, QueueItem } from '../types';
   let {
     playlist,
+    nowPlayingId,
+    onPlay,
     onChanged,
     onDeleted,
     onOpenAlbum,
-  }: { playlist: PlaylistRow; onChanged: () => Promise<void>; onDeleted: () => Promise<void>; onOpenAlbum: (albumId: number) => void } = $props();
+  }: {
+    playlist: PlaylistRow;
+    nowPlayingId: number | null;
+    onPlay: (items: QueueItem[], index: number) => void;
+    onChanged: () => Promise<void>;
+    onDeleted: () => Promise<void>;
+    onOpenAlbum: (albumId: number) => void;
+  } = $props();
 
   let entries = $state<PlaylistEntry[]>([]);
   let error = $state<string | null>(null);
@@ -17,7 +26,8 @@
   let name = $state('');
   let confirmDelete = $state(false);
 
-  const total = $derived(entries.reduce((sum, e) => sum + e.duration_ms, 0));
+  const items = $derived(entries.map((e) => ({ id: e.id, title: e.title, artist: e.artist, album_title: e.album_title })));
+  const total =$derived(entries.reduce((sum, e) => sum + e.duration_ms, 0));
 
   /** Reloads the entries; false (with `error` set) when that failed. */
   async function load(): Promise<boolean> {
@@ -100,8 +110,9 @@
     <table>
       <tbody>
         {#each entries as e, i (e.item_id)}
-          <tr>
-            <td class="num">{i + 1}</td>
+          <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+          <tr class:playing={nowPlayingId === e.id} ondblclick={() => onPlay(items, i)}>
+            <td class="num"><button class="playbtn" title="Play" onclick={() => onPlay(items, i)}>▶</button>{i + 1}</td>
             <td>{e.title}<span class="sub"> — {e.artist}</span></td>
             <td><button class="link" onclick={() => onOpenAlbum(e.album_id)}>{e.album_title}</button></td>
             <td class="dur">{formatDuration(e.duration_ms)}</td>
@@ -132,5 +143,7 @@
   .num, .dur, .ctl { width: 1%; white-space: nowrap; color: var(--muted); }
   .ctl button { padding: 2px 8px; }
   .sub { color: var(--muted); }
+  .playbtn { border: none; background: none; padding: 0 4px; color: var(--muted); }
+  tr.playing td { color: var(--accent); font-weight: 600; }
   .link { border: none; background: none; padding: 0; color: var(--accent); text-align: left; }
 </style>

@@ -7,6 +7,7 @@ import type {
   JobChoice,
   JobUpdate,
   PlanSummary,
+  PlayerStatus,
   PlaylistEntry,
   PlaylistRow,
   Selection,
@@ -77,3 +78,10 @@ export function formatBytes(n: number): string {
   if (n < 1024 ** 3) return `${Math.round(n / 1024 ** 2)} MB`;
   return `${(n / 1024 ** 3).toFixed(1)} GB`;
 }
+
+export const playTrack = (trackId: number) => invoke<void>('player_play', { trackId });
+export const playerPause = () => invoke<void>('player_pause');
+export const playerResume = () => invoke<void>('player_resume');
+export const playerSeek = (positionMs: number) => invoke<void>('player_seek', { positionMs: Math.max(0, Math.round(positionMs)) });
+export const playerStop = () => invoke<void>('player_stop');
+export const onPlayer = (cb: (s: PlayerStatus) => void): Promise<UnlistenFn> => listen<PlayerStatus>('player', (e) => cb(e.payload));

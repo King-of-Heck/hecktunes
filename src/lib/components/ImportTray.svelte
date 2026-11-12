@@ -1,6 +1,6 @@
 <script lang="ts">
   import type { JobUpdate } from '../types';
-  let { jobs, onClear }: { jobs: JobUpdate[]; onClear: () => void } = $props();
+  let { jobs, raised, onClear }: { jobs: JobUpdate[]; raised: boolean; onClear: () => void } = $props();
 
   const text: Record<JobUpdate['state'], string> = {
     queued: 'Waiting',
@@ -21,7 +21,7 @@
 </script>
 
 {#if jobs.length > 0}
-  <aside>
+  <aside class:raised>
     <div class="head">
       <strong>Imports</strong>
       <button onclick={onClear} disabled={!jobs.some(finished)}>Clear finished</button>
@@ -39,6 +39,7 @@
 
 <style>
   aside { position: fixed; right: 16px; bottom: 16px; width: 340px; max-height: 40vh; overflow: auto; background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); box-shadow: 0 4px 16px rgb(0 0 0 / 0.2); z-index: 40; }
+  aside.raised { bottom: 84px; }
   .head { display: flex; justify-content: space-between; align-items: center; padding: 8px 12px; border-bottom: 1px solid var(--border); }
   .head button { padding: 2px 8px; font-size: 12px; }
   ul { list-style: none; margin: 0; padding: 0; }

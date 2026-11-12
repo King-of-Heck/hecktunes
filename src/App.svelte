@@ -1,7 +1,8 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import * as api from './lib/api';
-  import type { AlbumRow, JobUpdate, PlaylistRow, SyncEvent, TrackRow, View } from './lib/types';
+  import type { AlbumRow, JobUpdate, PlayerStatus, PlaylistRow, QueueItem, SyncEvent, TrackRow, View } from './lib/types';
+  import NowPlaying from './lib/components/NowPlaying.svelte';
   import SyncPanel from './lib/components/SyncPanel.svelte';
   import ReleasePicker from './lib/components/ReleasePicker.svelte';
   import TagEditor from './lib/components/TagEditor.svelte';
@@ -90,12 +91,43 @@
 
   const logError = (what: string) => (e: unknown) => console.error(what, e);
 
+  let queue = $state<QueueItem[]>([]);
+  let queueIndex = $state(0);
+  let playerStatus = $state<PlayerStatus | null>(null);
+  const nowPlaying = $derived(queue[queueIndex] ?? null);
+  const nowPlayingId = $derived(playerStatus && playerStatus.state !== 'idle' ? playerStatus.track_id : null);
+
+  function playFrom(items: QueueItem[], index: number) {
+    queue = items;
+    queueIndex = index;
+    api.playTrack(items[index].id).catch(logError('play failed'));
+  }
+
+  function next() {
+    if (queueIndex + 1 < queue.length) playFrom(queue, queueIndex + 1);
+  }
+
+  function previous() {
+    if ((playerStatus?.position_ms ?? 0) > 3000 || queueIndex === 0) api.playerSeek(0).catch(logError('seek failed'));
+    else playFrom(queue, queueIndex - 1);
+  }
+
+  function onPlayer(s: PlayerStatus) {
+    playerStatus = s;
+    if (s.state === 'ended') {
+      if (queueIndex + 1 < queue.length) next();
+      else api.playerStop().catch(logError('stop failed'));
+    }
+    if (s.state === 'idle') queue = [];
+  }
+
   onMount(() => {
     refresh().catch(logError('refresh failed'));
     refreshPlaylists().catch(logError('playlists failed'));
     const unlisten = [
       api.onImportJob(onJob),
       api.onSync((e) => (syncEvent = e)),
+      api.onPlayer(onPlayer),
       api.onFileDrop({
         hover: (on) => (hovering = on),
         drop: (paths) => api.importPaths(paths).catch(logError('import failed')),
@@ -105,6 +137,7 @@
   });
 </script>
 
+<div class="app">
 <div class="layout">
   <Sidebar {view} needsCount={needs.length} {playlists} {syncing} onSelect={select} onCreatePlaylist={createPlaylist} />
   <main>
@@ -117,6 +150,8 @@
           {playlists}
           retryJobId={retryJobs[selected.id] ?? null}
           {syncing}
+          {nowPlayingId}
+          onPlay={playFrom}
           onRetry={() => retry(selected.id)}
           onBack={() => (selectedId = null)}
           onEdit={(t) => (editing = t)}
@@ -131,12 +166,14 @@
     {:else if view.kind === 'artists' && artistName === null}
       <ArtistList {albums} {bust} onOpen={(artist) => (view = { kind: 'artists', artist })} />
     {:else if view.kind === 'songs'}
-      <SongsView version={songsVersion} {playlists} onOpenAlbum={(id) => (selectedId = id)} onPlaylistsChanged={refreshPlaylists} />
+      <SongsView version={songsVersion} {playlists} {nowPlayingId} onPlay={playFrom} onOpenAlbum={(id) => (selectedId = id)} onPlaylistsChanged={refreshPlaylists} />
     {:else if view.kind === 'playlist'}
       {#if currentPlaylist}
         {#key currentPlaylist.id}
           <PlaylistView
             playlist={currentPlaylist}
+            {nowPlayingId}
+            onPlay={playFrom}
             onChanged={refreshPlaylists}
             onDeleted={async () => {
               select({ kind: 'albums' });
@@ -159,8 +196,10 @@
     {/if}
   </main>
 </div>
+  <NowPlaying status={playerStatus} item={nowPlaying} hasNext={queueIndex + 1 < queue.length} onPrevious={previous} onNext={next} />
+</div>
 <DropOverlay visible={hovering} />
-<ImportTray jobs={jobList} onClear={clearFinished} />
+<ImportTray jobs={jobList} raised={nowPlaying !== null} onClear={clearFinished} />
 {#if waiting}
   {#key waiting.job_id}
     <ReleasePicker job={waiting} />
@@ -171,7 +210,8 @@
 {/if}
 
 <style>
-  .layout { display: grid; grid-template-columns: 210px 1fr; height: 100vh; }
+  .app { display: grid; grid-template-rows: minmax(0, 1fr) auto; height: 100vh; }
+  .layout { display: grid; grid-template-columns: 210px 1fr; min-height: 0; }
   main { overflow: auto; }
   .crumbs { padding: 16px 24px 0; }
   .crumbs h2 { margin: 4px 0 0; font-size: 22px; }

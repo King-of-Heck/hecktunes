@@ -1,6 +1,6 @@
 <script lang="ts">
   import { albumTracks, coverUrl, deleteAlbum, formatDuration } from '../api';
-  import type { AlbumRow, JobUpdate, PlaylistRow, TrackRow } from '../types';
+  import type { AlbumRow, JobUpdate, PlaylistRow, QueueItem, TrackRow } from '../types';
   import AddToPlaylist from './AddToPlaylist.svelte';
   let {
     album,
@@ -9,6 +9,8 @@
     playlists,
     retryJobId,
     syncing,
+    nowPlayingId,
+    onPlay,
     onRetry,
     onBack,
     onEdit,
@@ -22,6 +24,8 @@
     retryJobId: number | null;
     /** A sync is copying library files: hold back changes to them until it ends. */
     syncing: boolean;
+    nowPlayingId: number | null;
+    onPlay: (items: QueueItem[], index: number) => void;
     onRetry: () => Promise<void>;
     onBack: () => void;
     onEdit: (tracks: TrackRow[]) => void;
@@ -30,6 +34,7 @@
   } = $props();
 
   let tracks = $state<TrackRow[]>([]);
+  const items = $derived(tracks.map((t) => ({ id: t.id, title: t.title, artist: t.artist, album_title: album.title })));
   let retryError = $state<string | null>(null);
   let confirming = $state(false);
   let removing = $state(false);
@@ -100,8 +105,10 @@
   </header>
   <table>
     <tbody>
-      {#each tracks as t (t.id)}
-        <tr>
+      {#each tracks as t, i (t.id)}
+        <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+        <tr class:playing={nowPlayingId === t.id} ondblclick={() => onPlay(items, i)}>
+          <td class="play"><button title="Play" onclick={() => onPlay(items, i)}>▶</button></td>
           <td class="num">{tracks.some((x) => x.disc > 1) ? `${t.disc}-` : ''}{t.number}</td>
           <td>{t.title}{#if t.artist !== album.album_artist}<span class="feat"> — {t.artist}</span>{/if}</td>
           <td class="fmt">{t.format.toUpperCase()}</td>
@@ -131,4 +138,7 @@
   td { padding: 7px 8px; border-bottom: 1px solid var(--border); }
   .num, .dur, .fmt { color: var(--muted); width: 1%; white-space: nowrap; }
   .feat { color: var(--muted); }
+  .play { width: 1%; }
+  .play button { border: none; background: none; padding: 0 4px; color: var(--muted); }
+  tr.playing td { color: var(--accent); font-weight: 600; }
 </style>

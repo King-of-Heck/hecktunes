@@ -1,13 +1,22 @@
 <script lang="ts">
   import { formatDuration, listSongs } from '../api';
-  import type { PlaylistRow, SongRow } from '../types';
+  import type { PlaylistRow, QueueItem, SongRow } from '../types';
   import AddToPlaylist from './AddToPlaylist.svelte';
   let {
     version,
     playlists,
+    nowPlayingId,
+    onPlay,
     onOpenAlbum,
     onPlaylistsChanged,
-  }: { version: number; playlists: PlaylistRow[]; onOpenAlbum: (albumId: number) => void; onPlaylistsChanged: () => Promise<void> } = $props();
+  }: {
+    version: number;
+    playlists: PlaylistRow[];
+    nowPlayingId: number | null;
+    onPlay: (items: QueueItem[], index: number) => void;
+    onOpenAlbum: (albumId: number) => void;
+    onPlaylistsChanged: () => Promise<void>;
+  } = $props();
 
   let songs = $state<SongRow[]>([]);
   let filter = $state('');
@@ -31,6 +40,8 @@
     if (!q) return songs;
     return songs.filter((s) => [s.title, s.artist, s.album_title, s.album_artist].some((f) => f.toLowerCase().includes(q)));
   });
+
+  const items = $derived(shown.map((s) => ({ id: s.id, title: s.title, artist: s.artist, album_title: s.album_title })));
 </script>
 
 <div class="songs">
@@ -41,10 +52,12 @@
   </header>
   {#if error}<p class="err">{error}</p>{/if}
   <table>
-    <thead><tr><th>Title</th><th>Artist</th><th>Album</th><th class="dur">Time</th><th></th></tr></thead>
+    <thead><tr><th></th><th>Title</th><th>Artist</th><th>Album</th><th class="dur">Time</th><th></th></tr></thead>
     <tbody>
-      {#each shown as s (s.id)}
-        <tr>
+      {#each shown as s, i (s.id)}
+        <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+        <tr class:playing={nowPlayingId === s.id} ondblclick={() => onPlay(items, i)}>
+          <td class="play"><button title="Play" onclick={() => onPlay(items, i)}>▶</button></td>
           <td>{s.title}</td>
           <td>{s.artist}</td>
           <td><button class="link" onclick={() => onOpenAlbum(s.album_id)}>{s.album_title}</button></td>
@@ -67,4 +80,7 @@
   .dur, .add { width: 1%; white-space: nowrap; color: var(--muted); }
   .link { border: none; background: none; padding: 0; color: var(--accent); text-align: left; }
   .err { color: var(--danger); }
+  .play { width: 1%; }
+  .play button { border: none; background: none; padding: 0 4px; color: var(--muted); }
+  tr.playing td { color: var(--accent); font-weight: 600; }
 </style>
