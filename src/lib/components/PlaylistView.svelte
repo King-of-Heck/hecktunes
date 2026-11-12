@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { inControl } from '../rows';
   import { onMount } from 'svelte';
   import * as api from '../api';
   import { formatDuration } from '../api';
@@ -27,7 +28,7 @@
   let confirmDelete = $state(false);
 
   const items = $derived(entries.map((e) => ({ id: e.id, title: e.title, artist: e.artist, album_title: e.album_title })));
-  const total =$derived(entries.reduce((sum, e) => sum + e.duration_ms, 0));
+  const total = $derived(entries.reduce((sum, e) => sum + e.duration_ms, 0));
 
   /** Reloads the entries; false (with `error` set) when that failed. */
   async function load(): Promise<boolean> {
@@ -111,7 +112,7 @@
       <tbody>
         {#each entries as e, i (e.item_id)}
           <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
-          <tr class:playing={nowPlayingId === e.id} ondblclick={() => onPlay(items, i)}>
+          <tr class:playing={nowPlayingId === e.id} ondblclick={(e) => { if (!inControl(e)) onPlay(items, i); }}>
             <td class="num"><button class="playbtn" title="Play" onclick={() => onPlay(items, i)}>▶</button>{i + 1}</td>
             <td>{e.title}<span class="sub"> — {e.artist}</span></td>
             <td><button class="link" onclick={() => onOpenAlbum(e.album_id)}>{e.album_title}</button></td>

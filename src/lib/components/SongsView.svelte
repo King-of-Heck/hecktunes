@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { inControl } from '../rows';
   import { formatDuration, listSongs } from '../api';
   import type { PlaylistRow, QueueItem, SongRow } from '../types';
   import AddToPlaylist from './AddToPlaylist.svelte';
@@ -56,7 +57,7 @@
     <tbody>
       {#each shown as s, i (s.id)}
         <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
-        <tr class:playing={nowPlayingId === s.id} ondblclick={() => onPlay(items, i)}>
+        <tr class:playing={nowPlayingId === s.id} ondblclick={(e) => { if (!inControl(e)) onPlay(items, i); }}>
           <td class="play"><button title="Play" onclick={() => onPlay(items, i)}>▶</button></td>
           <td>{s.title}</td>
           <td>{s.artist}</td>

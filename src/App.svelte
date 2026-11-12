@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import * as api from './lib/api';
+  import { reducePlayerEvent } from './lib/playerQueue';
   import type { AlbumRow, JobUpdate, PlayerStatus, PlaylistRow, QueueItem, SyncEvent, TrackRow, View } from './lib/types';
   import NowPlaying from './lib/components/NowPlaying.svelte';
   import SyncPanel from './lib/components/SyncPanel.svelte';
@@ -97,10 +98,21 @@
   const nowPlaying = $derived(queue[queueIndex] ?? null);
   const nowPlayingId = $derived(playerStatus && playerStatus.state !== 'idle' ? playerStatus.track_id : null);
 
+  // Track a play was requested for but whose playing/error status hasn't arrived yet.
+  let pendingId: number | null = null;
+  let playError = $state<string | null>(null);
+
   function playFrom(items: QueueItem[], index: number) {
     queue = items;
     queueIndex = index;
-    api.playTrack(items[index].id).catch(logError('play failed'));
+    const id = items[index].id;
+    pendingId = id;
+    playError = null;
+    api.playTrack(id).catch((e) => {
+      console.error('play failed', e);
+      if (pendingId === id) pendingId = null;
+      playError = String(e);
+    });
   }
 
   function next() {
@@ -114,11 +126,15 @@
 
   function onPlayer(s: PlayerStatus) {
     playerStatus = s;
-    if (s.state === 'ended') {
-      if (queueIndex + 1 < queue.length) next();
-      else api.playerStop().catch(logError('stop failed'));
+    const r = reducePlayerEvent(s, queue, queueIndex, pendingId);
+    pendingId = r.pendingId;
+    if (s.state === 'playing' || s.state === 'error') playError = null;
+    if (r.action === 'advance') next();
+    else if (r.action === 'stop') api.playerStop().catch(logError('stop failed'));
+    else if (r.action === 'clear') {
+      queue = [];
+      playError = null;
     }
-    if (s.state === 'idle') queue = [];
   }
 
   onMount(() => {
@@ -196,7 +212,7 @@
     {/if}
   </main>
 </div>
-  <NowPlaying status={playerStatus} item={nowPlaying} hasNext={queueIndex + 1 < queue.length} onPrevious={previous} onNext={next} />
+  <NowPlaying status={playerStatus} item={nowPlaying} {playError} hasNext={queueIndex + 1 < queue.length} onPrevious={previous} onNext={next} />
 </div>
 <DropOverlay visible={hovering} />
 <ImportTray jobs={jobList} raised={nowPlaying !== null} onClear={clearFinished} />

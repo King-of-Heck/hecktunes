@@ -6,9 +6,10 @@
     status,
     item,
     hasNext,
+    playError = null,
     onPrevious,
     onNext,
-  }: { status: PlayerStatus | null; item: QueueItem | null; hasNext: boolean; onPrevious: () => void; onNext: () => void } = $props();
+  }: { status: PlayerStatus | null; item: QueueItem | null; hasNext: boolean; playError?: string | null; onPrevious: () => void; onNext: () => void } = $props();
 
   // While dragging the slider, show the dragged position instead of the live one.
   let dragging = $state<number | null>(null);
@@ -29,7 +30,7 @@
     <div class="what">
       <strong>{item.title}</strong>
       <span>{item.artist} · {item.album_title}</span>
-      {#if status?.state === 'error'}<span class="err">{status.error}</span>{/if}
+      {#if playError}<span class="err">{playError}</span>{:else if status?.state === 'error'}<span class="err">{status.error}</span>{/if}
     </div>
     <div class="controls">
       <button title="Previous" onclick={onPrevious}>⏮</button>
@@ -49,6 +50,8 @@
         disabled={duration === 0}
         oninput={(e) => (dragging = Number(e.currentTarget.value))}
         onchange={(e) => seek(Number(e.currentTarget.value))}
+        onpointerup={() => (dragging = null)}
+        onblur={() => (dragging = null)}
         aria-label="Position"
       />
       <span class="time">{formatDuration(duration)}</span>

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { inControl } from '../rows';
   import { albumTracks, coverUrl, deleteAlbum, formatDuration } from '../api';
   import type { AlbumRow, JobUpdate, PlaylistRow, QueueItem, TrackRow } from '../types';
   import AddToPlaylist from './AddToPlaylist.svelte';
@@ -107,7 +108,7 @@
     <tbody>
       {#each tracks as t, i (t.id)}
         <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
-        <tr class:playing={nowPlayingId === t.id} ondblclick={() => onPlay(items, i)}>
+        <tr class:playing={nowPlayingId === t.id} ondblclick={(e) => { if (!inControl(e)) onPlay(items, i); }}>
           <td class="play"><button title="Play" onclick={() => onPlay(items, i)}>▶</button></td>
           <td class="num">{tracks.some((x) => x.disc > 1) ? `${t.disc}-` : ''}{t.number}</td>
           <td>{t.title}{#if t.artist !== album.album_artist}<span class="feat"> — {t.artist}</span>{/if}</td>
