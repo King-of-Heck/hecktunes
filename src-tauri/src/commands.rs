@@ -5,6 +5,7 @@ use crate::import::jobs::{Command, ImportQueue, JobChoice};
 use crate::library::{
     editing, AlbumEdit, AlbumRow, Library, PlaylistEntry, PlaylistRow, Selection, SelectionKind, SongRow, TrackEdit, TrackRow,
 };
+use crate::settings::{self, Settings, SettingsView};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Emitter, State};
@@ -14,6 +15,45 @@ pub struct AppState {
     pub queue: ImportQueue,
     pub sync: SyncService,
     pub player: crate::player::PlayerService,
+    pub settings: SettingsState,
+}
+
+pub struct SettingsState {
+    pub config_dir: PathBuf,
+    pub default_root: PathBuf,
+    pub active_root: PathBuf,
+    /// settings.json as it was when the app started (what is in effect now).
+    pub startup: Settings,
+    pub key_active: bool,
+}
+
+fn settings_view(state: &AppState, saved: &Settings, problem: Option<String>) -> CmdResult<SettingsView> {
+    let s = &state.settings;
+    let albums = state.lib.lock().unwrap().list_albums().map_err(err)?.len();
+    Ok(settings::view(saved, &s.startup, &s.active_root, &s.default_root, s.key_active, problem, albums))
+}
+
+#[tauri::command(async)]
+pub fn get_settings(state: State<AppState>) -> CmdResult<SettingsView> {
+    let (saved, problem) = settings::load_checked(&state.settings.config_dir);
+    settings_view(&state, &saved, problem)
+}
+
+#[tauri::command(async)]
+pub fn set_library_root(state: State<AppState>, path: Option<String>) -> CmdResult<SettingsView> {
+    let (saved, _) = settings::load_checked(&state.settings.config_dir);
+    let albums = state.lib.lock().unwrap().list_albums().map_err(err)?.len();
+    let updated = settings::with_library_root(saved, path.map(PathBuf::from), albums).map_err(err)?;
+    settings::save(&state.settings.config_dir, &updated).map_err(err)?;
+    settings_view(&state, &updated, None)
+}
+
+#[tauri::command(async)]
+pub fn set_acoustid_key(state: State<AppState>, key: Option<String>) -> CmdResult<SettingsView> {
+    let (saved, _) = settings::load_checked(&state.settings.config_dir);
+    let updated = settings::with_acoustid_key(saved, key);
+    settings::save(&state.settings.config_dir, &updated).map_err(err)?;
+    settings_view(&state, &updated, None)
 }
 
 // Every command is `async` so Tauri runs it off the main (UI) thread: several block on the

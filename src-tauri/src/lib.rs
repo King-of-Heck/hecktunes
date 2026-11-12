@@ -21,16 +21,22 @@ use tauri::{Emitter, Manager};
 
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_opener::init())
         .setup(|app| {
-            let settings = settings::load(&app.path().app_config_dir()?);
-            let root = match settings.library_root.clone() {
-                Some(r) => r,
-                None => app.path().audio_dir()?.join("HeckTunes"),
-            };
+            let config_dir = app.path().app_config_dir()?;
+            let (settings, settings_problem) = settings::load_checked(&config_dir);
+            if let Some(p) = &settings_problem {
+                eprintln!("{}", p.chars().map(|c| if c.is_ascii() { c } else { '?' }).collect::<String>());
+            }
+            let default_root = app.path().audio_dir()?.join("HeckTunes");
+            let root = settings.library_root.clone().unwrap_or_else(|| default_root.clone());
+            let startup = settings.clone();
             std::fs::create_dir_all(&root)?;
             app.asset_protocol_scope().allow_directory(&root, true)?;
             let data_dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&data_dir)?;
+            let active_root = root.clone();
             let lib = Arc::new(Mutex::new(Library::open(&data_dir.join("library.db"), root)?));
             // Settings file, then runtime env var, then the key baked in at build time.
             let key = settings::resolve_acoustid_key(
@@ -38,6 +44,7 @@ pub fn run() {
                 std::env::var("HECKTUNES_ACOUSTID_KEY").ok(),
                 option_env!("HECKTUNES_ACOUSTID_KEY"),
             );
+            let key_active = key.is_some();
             let source: Arc<dyn MetadataSource> = Arc::new(OnlineSource::new(key));
             let handle = app.handle().clone();
             let queue = ImportQueue::start(lib.clone(), source, move |update| {
@@ -51,7 +58,8 @@ pub fn run() {
                     let _ = player_handle.emit("player", status);
                 },
             );
-            app.manage(AppState { lib, queue, sync, player });
+            let settings = commands::SettingsState { config_dir, default_root, active_root, startup, key_active };
+            app.manage(AppState { lib, queue, sync, player, settings });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -83,6 +91,9 @@ pub fn run() {
             commands::player_resume,
             commands::player_seek,
             commands::player_stop,
+            commands::get_settings,
+            commands::set_library_root,
+            commands::set_acoustid_key,
         ])
         .run(tauri::generate_context!())
         .expect("error while running HeckTunes");
