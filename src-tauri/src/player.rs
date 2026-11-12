@@ -2,6 +2,7 @@
 //! to it through `PlayerService` and hears back through the `notify` callback.
 use anyhow::{anyhow, Result};
 use serde::Serialize;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, RecvTimeoutError, Sender};
 use std::time::Duration;
@@ -22,7 +23,7 @@ pub trait Audio {
 }
 
 pub struct RodioAudio {
-    _sink: rodio::MixerDeviceSink,
+    sink: rodio::MixerDeviceSink,
     player: rodio::Player,
 }
 
@@ -31,7 +32,7 @@ impl RodioAudio {
         let mut sink = rodio::DeviceSinkBuilder::open_default_sink().map_err(|e| anyhow!("{e}"))?;
         sink.log_on_drop(false);
         let player = rodio::Player::connect_new(sink.mixer());
-        Ok(Self { _sink: sink, player })
+        Ok(Self { sink, player })
     }
 }
 
@@ -41,7 +42,9 @@ impl Audio for RodioAudio {
         let file = std::fs::File::open(path)?;
         let source = rodio::Decoder::try_from(file).map_err(|e| anyhow!("{e}"))?;
         let duration = source.total_duration().map(|d| d.as_millis() as u64);
-        self.player.clear();
+        // Drop the old player and start a fresh one rather than `clear()`, which blocks until the
+        // audio thread answers and would hang this thread on a wedged or unplugged device.
+        self.player = rodio::Player::connect_new(self.sink.mixer());
         self.player.append(source);
         self.player.play();
         Ok(duration)
@@ -53,10 +56,12 @@ impl Audio for RodioAudio {
         self.player.play();
     }
     fn seek(&mut self, ms: u64) -> Result<()> {
+        // Note: `try_seek` can still block until the audio thread answers; no way around that here.
         self.player.try_seek(Duration::from_millis(ms)).map_err(|e| anyhow!("{e}"))
     }
     fn stop(&mut self) {
-        self.player.clear();
+        // Dropping a `Player` sets its `stopped` flag, which silences and removes its sources.
+        self.player = rodio::Player::connect_new(self.sink.mixer());
     }
     fn position_ms(&self) -> u64 {
         self.player.get_pos().as_millis() as u64
@@ -117,7 +122,15 @@ impl PlayerService {
                 loop {
                     match rx.recv_timeout(TICK) {
                         Ok(cmd) => {
-                            handle(cmd, &open, &mut audio, &mut status);
+                            let track_id = match &cmd {
+                                Cmd::Play { track_id, .. } => Some(*track_id),
+                                _ => status.track_id,
+                            };
+                            let done = catch_unwind(AssertUnwindSafe(|| handle(cmd, &open, &mut audio, &mut status)));
+                            if done.is_err() {
+                                audio = None;
+                                status = panic_status(track_id);
+                            }
                             notify(status.clone());
                         }
                         Err(RecvTimeoutError::Timeout) => {
@@ -125,14 +138,21 @@ impl PlayerService {
                                 continue;
                             }
                             let Some(a) = audio.as_ref() else { continue };
-                            if a.finished() {
-                                status.state = PlayState::Ended;
-                                status.position_ms = status.duration_ms;
-                                notify(status.clone());
-                            } else {
-                                let pos = a.position_ms();
-                                if pos != status.position_ms {
-                                    status.position_ms = pos;
+                            match catch_unwind(AssertUnwindSafe(|| if a.finished() { None } else { Some(a.position_ms()) })) {
+                                Ok(None) => {
+                                    status.state = PlayState::Ended;
+                                    status.position_ms = status.duration_ms;
+                                    notify(status.clone());
+                                }
+                                Ok(Some(pos)) => {
+                                    if pos != status.position_ms {
+                                        status.position_ms = pos;
+                                        notify(status.clone());
+                                    }
+                                }
+                                Err(_) => {
+                                    audio = None;
+                                    status = panic_status(status.track_id);
                                     notify(status.clone());
                                 }
                             }
@@ -162,6 +182,16 @@ impl PlayerService {
     }
 }
 
+/// What the UI sees when the audio code panicked; the device is reopened on the next play.
+fn panic_status(track_id: Option<i64>) -> PlayerStatus {
+    PlayerStatus {
+        state: PlayState::Error,
+        track_id,
+        error: Some("Playback stopped unexpectedly. Try playing the track again.".into()),
+        ..PlayerStatus::idle()
+    }
+}
+
 fn file_name(path: &Path) -> String {
     path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
 }
@@ -178,7 +208,12 @@ fn handle(
                 match open() {
                     Ok(a) => *audio = Some(a),
                     Err(e) => {
-                        *status = PlayerStatus { error: Some(format!("No sound output is available ({e}).")), state: PlayState::Error, ..PlayerStatus::idle() };
+                        *status = PlayerStatus {
+                            error: Some(format!("No sound output is available ({e}).")),
+                            state: PlayState::Error,
+                            track_id: Some(track_id),
+                            ..PlayerStatus::idle()
+                        };
                         return;
                     }
                 }
@@ -249,12 +284,19 @@ mod tests {
         position: u64,
         finished: bool,
         fail_load: bool,
+        /// True when `stop` was called after the last successful load.
+        stopped_since_load: bool,
+        /// pause/resume/seek calls received.
+        control_calls: u32,
     }
 
     struct FakeAudio(Arc<Mutex<Shared>>);
 
     impl Audio for FakeAudio {
         fn load(&mut self, path: &Path) -> anyhow::Result<Option<u64>> {
+            if path.to_string_lossy().contains("corrupt") {
+                panic!("decoder blew up on a corrupt file");
+            }
             let mut s = self.0.lock().unwrap();
             if s.fail_load {
                 anyhow::bail!("unsupported format");
@@ -263,22 +305,30 @@ mod tests {
             s.paused = false;
             s.position = 0;
             s.finished = false;
+            s.stopped_since_load = false;
             Ok(Some(90_000))
         }
         fn pause(&mut self) {
-            self.0.lock().unwrap().paused = true;
+            let mut s = self.0.lock().unwrap();
+            s.paused = true;
+            s.control_calls += 1;
         }
         fn resume(&mut self) {
-            self.0.lock().unwrap().paused = false;
+            let mut s = self.0.lock().unwrap();
+            s.paused = false;
+            s.control_calls += 1;
         }
         fn seek(&mut self, ms: u64) -> anyhow::Result<()> {
-            self.0.lock().unwrap().position = ms;
+            let mut s = self.0.lock().unwrap();
+            s.position = ms;
+            s.control_calls += 1;
             Ok(())
         }
         fn stop(&mut self) {
             let mut s = self.0.lock().unwrap();
             s.position = 0;
             s.finished = false;
+            s.stopped_since_load = true;
         }
         fn position_ms(&self) -> u64 {
             self.0.lock().unwrap().position
@@ -351,8 +401,73 @@ mod tests {
         shared.lock().unwrap().finished = true;
         let s = wait_for(&rx, |s| s.state == PlayState::Ended);
         assert_eq!(s.track_id, Some(1));
-        // no repeats after the end
-        assert!(rx.recv_timeout(TICK * 4).map(|s| s.state != PlayState::Ended).unwrap_or(true));
+        // no repeats after the end: drain for ~4 ticks, none may be Ended
+        let until = std::time::Instant::now() + TICK * 4;
+        loop {
+            let left = until.saturating_duration_since(std::time::Instant::now());
+            match rx.recv_timeout(left) {
+                Ok(s) => assert_ne!(s.state, PlayState::Ended, "repeated Ended"),
+                Err(_) => break,
+            }
+        }
+    }
+
+    #[test]
+    fn a_decoder_panic_is_reported_and_the_player_keeps_working() {
+        let shared = Arc::new(Mutex::new(Shared::default()));
+        let (svc, rx) = service(shared.clone(), Arc::new(Mutex::new(false)));
+        svc.play(1, PathBuf::from("ok.flac"), 0);
+        wait_for(&rx, |s| s.state == PlayState::Playing);
+        svc.play(5, PathBuf::from("corrupt.flac"), 0);
+        let s = wait_for(&rx, |s| s.state == PlayState::Error);
+        assert_eq!(s.track_id, Some(5));
+        assert!(s.error.as_deref().unwrap().contains("Playback stopped unexpectedly"), "{s:?}");
+        svc.play(2, PathBuf::from("b.flac"), 0);
+        wait_for(&rx, |s| s.state == PlayState::Playing && s.track_id == Some(2));
+    }
+
+    #[test]
+    fn a_failed_load_stops_the_previous_track() {
+        let shared = Arc::new(Mutex::new(Shared::default()));
+        let (svc, rx) = service(shared.clone(), Arc::new(Mutex::new(false)));
+        svc.play(1, PathBuf::from("a.flac"), 0);
+        wait_for(&rx, |s| s.state == PlayState::Playing);
+        assert!(!shared.lock().unwrap().stopped_since_load);
+        shared.lock().unwrap().fail_load = true;
+        svc.play(2, PathBuf::from("b.opus"), 0);
+        wait_for(&rx, |s| s.state == PlayState::Error);
+        assert!(shared.lock().unwrap().stopped_since_load);
+    }
+
+    #[test]
+    fn pause_resume_and_seek_do_nothing_after_an_error_or_the_end() {
+        // Error state
+        let shared = Arc::new(Mutex::new(Shared { fail_load: true, ..Default::default() }));
+        let (svc, rx) = service(shared.clone(), Arc::new(Mutex::new(false)));
+        svc.play(1, PathBuf::from("a.opus"), 0);
+        let err = wait_for(&rx, |s| s.state == PlayState::Error);
+        svc.pause();
+        svc.resume();
+        svc.seek(5_000);
+        for _ in 0..3 {
+            assert_eq!(rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap(), err);
+        }
+        assert_eq!(shared.lock().unwrap().control_calls, 0);
+
+        // Ended state
+        let shared = Arc::new(Mutex::new(Shared::default()));
+        let (svc, rx) = service(shared.clone(), Arc::new(Mutex::new(false)));
+        svc.play(1, PathBuf::from("a.flac"), 0);
+        wait_for(&rx, |s| s.state == PlayState::Playing);
+        shared.lock().unwrap().finished = true;
+        let ended = wait_for(&rx, |s| s.state == PlayState::Ended);
+        svc.pause();
+        svc.resume();
+        svc.seek(5_000);
+        for _ in 0..3 {
+            assert_eq!(rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap(), ended);
+        }
+        assert_eq!(shared.lock().unwrap().control_calls, 0);
     }
 
     #[test]
@@ -364,6 +479,7 @@ mod tests {
         svc.play(1, PathBuf::from("a.opus"), 1000);
         let s = wait_for(&rx, |s| s.state == PlayState::Error);
         assert!(s.error.as_deref().unwrap().contains("sound output"), "{s:?}");
+        assert_eq!(s.track_id, Some(1));
 
         *open_fails.lock().unwrap() = false;
         svc.play(1, PathBuf::from("a.opus"), 1000);
