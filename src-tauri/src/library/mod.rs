@@ -64,7 +64,15 @@ CREATE TABLE device_selection (
     PRIMARY KEY (kind, ref)
 );
 "#,
+    r#"
+CREATE TABLE meta (
+    key TEXT PRIMARY KEY,
+    value TEXT
+);
+"#,
 ];
+
+const META_LIBRARY_ROOT: &str = "library_root";
 
 #[derive(Debug, Clone)]
 pub struct NewAlbum {
@@ -269,6 +277,31 @@ impl Library {
 
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    /// The library folder last recorded in the database (see `record_root`).
+    pub fn recorded_root(&self) -> Result<Option<PathBuf>> {
+        let v: Option<Option<String>> = self
+            .conn
+            .query_row("SELECT value FROM meta WHERE key = ?1", [META_LIBRARY_ROOT], |r| r.get(0))
+            .optional()?;
+        Ok(v.flatten().filter(|s| !s.is_empty()).map(PathBuf::from))
+    }
+
+    /// Records the folder the library's relative paths belong to, so the library can still be
+    /// found if settings.json is lost or damaged.
+    pub fn record_root(&self, root: &Path) -> Result<()> {
+        let text = root.to_str().ok_or_else(|| anyhow!("{} isn't a valid UTF-8 path", root.display()))?;
+        self.conn.execute(
+            "INSERT INTO meta (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![META_LIBRARY_ROOT, text],
+        )?;
+        Ok(())
+    }
+
+    pub fn album_count(&self) -> Result<usize> {
+        let n: i64 = self.conn.query_row("SELECT COUNT(*) FROM albums", [], |r| r.get(0))?;
+        Ok(n as usize)
     }
 
     pub fn insert_album(&mut self, a: &NewAlbum) -> Result<i64> {
@@ -809,5 +842,59 @@ mod tests {
         let (a, b) = (l.track(t[0]).unwrap().unwrap(), l.track(t[1]).unwrap().unwrap());
         assert_eq!((a.size_bytes, a.content_hash.as_deref()), (10, Some("newer")));
         assert_eq!((b.size_bytes, b.content_hash.as_deref()), (12, Some("first")));
+    }
+}
+
+#[cfg(test)]
+mod root_record_tests {
+    use super::*;
+
+    #[test]
+    fn migration_3_adds_a_meta_table_to_a_version_2_database() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("library.db");
+        {
+            let mut conn = Connection::open(&db).unwrap();
+            run_migrations(&mut conn, &MIGRATIONS[..2]).unwrap();
+            conn.execute_batch("INSERT INTO albums (title, album_artist, folder_path, added_at) VALUES ('A', 'B', 'B/A', 0);").unwrap();
+        }
+        let lib = Library::open(&db, dir.path().join("lib")).unwrap();
+        let v: i64 = lib.conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+        assert_eq!(v, 3);
+        assert_eq!(lib.album_count().unwrap(), 1);
+        assert_eq!(lib.recorded_root().unwrap(), None);
+    }
+
+    #[test]
+    fn the_library_root_is_recorded_and_read_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("library.db");
+        let root = dir.path().join("E Tunes");
+        Library::open(&db, root.clone()).unwrap().record_root(&root).unwrap();
+        let other = dir.path().join("Other");
+        let lib = Library::open(&db, other.clone()).unwrap();
+        assert_eq!(lib.recorded_root().unwrap(), Some(root));
+        lib.record_root(&other).unwrap();
+        assert_eq!(lib.recorded_root().unwrap(), Some(other));
+    }
+
+    #[test]
+    fn album_count_counts_albums() {
+        let mut lib = Library::open_in_memory(PathBuf::from("/lib")).unwrap();
+        assert_eq!(lib.album_count().unwrap(), 0);
+        for t in ["A", "B"] {
+            lib.insert_album(&NewAlbum {
+                title: t.into(),
+                album_artist: "X".into(),
+                year: None,
+                genre: None,
+                mb_release_id: None,
+                folder: PathBuf::from("X").join(t),
+                cover: None,
+                needs_metadata: false,
+            })
+            .unwrap();
+        }
+        assert_eq!(lib.album_count().unwrap(), 2);
     }
 }

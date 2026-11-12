@@ -40,19 +40,76 @@ pub fn save(config_dir: &Path, s: &Settings) -> Result<()> {
     Ok(())
 }
 
-/// `None` goes back to the default folder. Only allowed while the library is empty.
+/// "1 album", "3 albums".
+pub fn albums_text(n: usize) -> String {
+    format!("{n} {}", if n == 1 { "album" } else { "albums" })
+}
+
+/// `None` goes back to the default folder. Only allowed while the library is empty, and a chosen
+/// folder must be empty too (the library owns everything under it).
 pub fn with_library_root(saved: Settings, root: Option<PathBuf>, album_count: usize) -> Result<Settings> {
     if album_count > 0 {
         bail!(
-            "Your library already has {album_count} albums. Moving an existing library to another folder isn't supported yet."
+            "Your library already has {}. Moving an existing library to another folder isn't supported yet.",
+            albums_text(album_count)
         );
     }
     if let Some(r) = &root {
         if !r.is_dir() {
             bail!("{} isn't a folder.", r.display());
         }
+        let has_entries = std::fs::read_dir(r)
+            .with_context(|| format!("couldn't read {}", r.display()))?
+            .next()
+            .is_some();
+        if has_entries {
+            bail!("{} isn't empty. Choose an empty folder for the library.", r.display());
+        }
     }
     Ok(Settings { library_root: root, ..saved })
+}
+
+/// What to start a save from: settings.json as read, or, when it is damaged, the settings in
+/// effect now, so saving one setting doesn't silently drop the library folder in use.
+pub fn save_base(saved: Settings, damaged: bool, in_effect: &Settings) -> Settings {
+    if damaged {
+        in_effect.clone()
+    } else {
+        saved
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct RootChoice {
+    /// The library folder to use.
+    pub root: PathBuf,
+    /// Whether it exists now (a custom folder on a disconnected drive doesn't).
+    pub available: bool,
+    /// The non-default folder in effect, as settings.json would record it.
+    pub custom: Option<PathBuf>,
+}
+
+/// Picks the library folder at startup: settings.json's (if it names an absolute path, even when
+/// that folder is missing right now), else the one recorded in the library database if it still
+/// exists (covers a damaged or lost settings.json), else the default.
+pub fn choose_library_root(
+    settings_root: Option<&Path>,
+    recorded: Option<&Path>,
+    default_root: &Path,
+    is_dir: impl Fn(&Path) -> bool,
+) -> RootChoice {
+    if let Some(r) = settings_root.filter(|r| r.is_absolute() || r.has_root()) {
+        return RootChoice { root: r.to_path_buf(), available: is_dir(r), custom: Some(r.to_path_buf()) };
+    }
+    if let Some(r) = recorded.filter(|r| is_dir(r)) {
+        let custom = (r != default_root).then(|| r.to_path_buf());
+        return RootChoice { root: r.to_path_buf(), available: true, custom };
+    }
+    RootChoice { root: default_root.to_path_buf(), available: true, custom: None }
+}
+
+pub fn unavailable_message(root: &Path) -> String {
+    format!("Your library folder {} isn't available (is the drive connected?)", root.display())
 }
 
 /// Blank clears the override (the built-in key, if any, is used again).
@@ -75,6 +132,8 @@ pub struct SettingsView {
     pub restart_needed: bool,
     pub problem: Option<String>,
     pub album_count: usize,
+    /// Set when the library folder in use is missing (e.g. its drive isn't connected).
+    pub library_unavailable: Option<String>,
 }
 
 pub fn view(
@@ -85,6 +144,7 @@ pub fn view(
     key_active: bool,
     problem: Option<String>,
     album_count: usize,
+    library_available: bool,
 ) -> SettingsView {
     SettingsView {
         library_root: active_root.display().to_string(),
@@ -95,6 +155,7 @@ pub fn view(
         restart_needed: saved != startup,
         problem,
         album_count,
+        library_unavailable: (!library_available).then(|| unavailable_message(active_root)),
     }
 }
 
@@ -179,6 +240,8 @@ mod tests {
         assert_eq!(s.library_root.as_deref(), Some(dir.path()));
         let err = with_library_root(Settings::default(), Some(dir.path().to_path_buf()), 3).unwrap_err();
         assert!(err.to_string().contains("3 albums"), "{err}");
+        let err = with_library_root(Settings::default(), Some(dir.path().to_path_buf()), 1).unwrap_err();
+        assert!(err.to_string().contains("already has 1 album."), "{err}");
         let err = with_library_root(Settings::default(), Some(dir.path().join("missing")), 0).unwrap_err();
         assert!(err.to_string().contains("isn't a folder"), "{err}");
         assert_eq!(with_library_root(s, None, 0).unwrap().library_root, None);
@@ -195,11 +258,11 @@ mod tests {
     fn view_reports_what_is_in_use_and_whether_a_restart_is_needed() {
         let startup = Settings::default();
         let saved = Settings { library_root: Some(PathBuf::from("E:/Tunes")), acoustid_key: None };
-        let v = view(&saved, &startup, Path::new("C:/Music/HeckTunes"), Path::new("C:/Music/HeckTunes"), true, None, 0);
+        let v = view(&saved, &startup, Path::new("C:/Music/HeckTunes"), Path::new("C:/Music/HeckTunes"), true, None, 0, true);
         assert_eq!(v.library_root, "C:/Music/HeckTunes");
         assert_eq!(v.saved_library_root.as_deref(), Some("E:/Tunes"));
         assert!(v.restart_needed && v.acoustid_key_active);
-        let same = view(&startup, &startup, Path::new("C:/Music/HeckTunes"), Path::new("C:/Music/HeckTunes"), false, None, 2);
+        let same = view(&startup, &startup, Path::new("C:/Music/HeckTunes"), Path::new("C:/Music/HeckTunes"), false, None, 2, true);
         assert!(!same.restart_needed);
         assert_eq!(same.album_count, 2);
     }
@@ -212,5 +275,72 @@ mod tests {
         let s = load(dir.path());
         assert_eq!(s.acoustid_key.as_deref(), Some("abc"));
         assert_eq!(s.library_root, Some(PathBuf::from("D:/Music")));
+    }
+}
+
+#[cfg(test)]
+mod root_tests {
+    use super::*;
+
+    #[test]
+    fn the_library_folder_must_be_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("old.mp3"), b"x").unwrap();
+        let err = with_library_root(Settings::default(), Some(dir.path().to_path_buf()), 0).unwrap_err();
+        assert!(err.to_string().contains("isn't empty"), "{err}");
+    }
+
+    fn exists_only(dirs: &'static [&'static str]) -> impl Fn(&Path) -> bool {
+        move |p| dirs.iter().any(|d| Path::new(d) == p)
+    }
+
+    #[test]
+    fn settings_root_wins_even_when_its_drive_is_missing() {
+        let d = Path::new("C:/Music/HeckTunes");
+        let c = choose_library_root(Some(Path::new("E:/Tunes")), Some(Path::new("F:/Old")), d, exists_only(&["E:/Tunes", "F:/Old"]));
+        assert_eq!(c, RootChoice { root: "E:/Tunes".into(), available: true, custom: Some("E:/Tunes".into()) });
+        let c = choose_library_root(Some(Path::new("E:/Tunes")), Some(Path::new("F:/Old")), d, exists_only(&["F:/Old"]));
+        assert_eq!(c, RootChoice { root: "E:/Tunes".into(), available: false, custom: Some("E:/Tunes".into()) });
+    }
+
+    #[test]
+    fn without_a_settings_root_the_recorded_root_is_used_if_it_exists() {
+        let d = Path::new("C:/Music/HeckTunes");
+        let c = choose_library_root(None, Some(Path::new("F:/Old")), d, exists_only(&["F:/Old"]));
+        assert_eq!(c, RootChoice { root: "F:/Old".into(), available: true, custom: Some("F:/Old".into()) });
+        let c = choose_library_root(None, Some(Path::new("F:/Old")), d, exists_only(&[]));
+        assert_eq!(c, RootChoice { root: d.into(), available: true, custom: None });
+        let c = choose_library_root(None, Some(d), d, exists_only(&["C:/Music/HeckTunes"]));
+        assert_eq!(c, RootChoice { root: d.into(), available: true, custom: None });
+        let c = choose_library_root(None, None, d, exists_only(&[]));
+        assert_eq!(c, RootChoice { root: d.into(), available: true, custom: None });
+    }
+
+    #[test]
+    fn a_relative_settings_root_is_ignored() {
+        let d = Path::new("C:/Music/HeckTunes");
+        let c = choose_library_root(Some(Path::new("Tunes")), None, d, exists_only(&["Tunes"]));
+        assert_eq!(c.root, d);
+    }
+
+    #[test]
+    fn saving_over_a_damaged_file_keeps_the_library_folder_in_use() {
+        let in_effect = Settings { library_root: Some("E:/Tunes".into()), acoustid_key: None };
+        let base = save_base(Settings::default(), true, &in_effect);
+        assert_eq!(with_acoustid_key(base, Some("k".into())).library_root.as_deref(), Some(Path::new("E:/Tunes")));
+        let fine = Settings { library_root: None, acoustid_key: Some("old".into()) };
+        assert_eq!(save_base(fine.clone(), false, &in_effect), fine);
+    }
+
+    #[test]
+    fn unavailable_folder_message_names_the_folder() {
+        assert_eq!(
+            unavailable_message(Path::new("E:/Tunes")),
+            "Your library folder E:/Tunes isn't available (is the drive connected?)"
+        );
+        let v = view(&Settings::default(), &Settings::default(), Path::new("E:/Tunes"), Path::new("C:/M"), false, None, 0, false);
+        assert_eq!(v.library_unavailable.as_deref(), Some("Your library folder E:/Tunes isn't available (is the drive connected?)"));
+        let v = view(&Settings::default(), &Settings::default(), Path::new("E:/Tunes"), Path::new("C:/M"), false, None, 0, true);
+        assert!(v.library_unavailable.is_none());
     }
 }

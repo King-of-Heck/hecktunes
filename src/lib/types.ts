@@ -201,6 +201,8 @@ export interface SettingsView {
   restart_needed: boolean;
   problem: string | null;
   album_count: number;
+  /** Set when the library folder in use is missing (e.g. its drive isn't connected). */
+  library_unavailable: string | null;
 }
 
 export interface AboutInfo {

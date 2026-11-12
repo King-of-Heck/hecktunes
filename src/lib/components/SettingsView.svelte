@@ -50,7 +50,11 @@
 
 <div class="settings">
   <h2>Settings</h2>
-  {#if s?.problem}<p class="warn">{s.problem}</p>{/if}
+  {#if s?.library_unavailable}<p class="warn">{s.library_unavailable}</p>{/if}
+  {#if s?.problem}
+    <p class="warn">{s.problem}</p>
+    <p class="meta">Saving here replaces settings.json; your library folder stays as it is.</p>
+  {/if}
   {#if s?.restart_needed}<p class="note">Restart HeckTunes to use the saved settings.</p>{/if}
   {#if error}<p class="err">{error}</p>{/if}
   {#if saved}<p class="ok">{saved}</p>{/if}

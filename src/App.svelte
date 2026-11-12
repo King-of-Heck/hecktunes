@@ -30,6 +30,8 @@
   // album id -> id of its running Fix-metadata job; lives here so it survives AlbumDetail remounts.
   let retryJobs = $state<Record<number, number>>({});
   let syncEvent = $state<SyncEvent | null>(null);
+  // Set when the library folder was missing at startup (e.g. its drive isn't connected).
+  let libraryUnavailable = $state<string | null>(null);
   const syncing = $derived(syncEvent !== null && syncEvent.state !== 'finished' && syncEvent.state !== 'failed');
 
   const needs = $derived(albums.filter((a) => a.needs_metadata));
@@ -145,6 +147,10 @@
   onMount(() => {
     refresh().catch(logError('refresh failed'));
     refreshPlaylists().catch(logError('playlists failed'));
+    api
+      .getSettings()
+      .then((s) => (libraryUnavailable = s.library_unavailable))
+      .catch(logError('settings failed'));
     const unlisten = [
       api.onImportJob(onJob),
       api.onSync((e) => (syncEvent = e)),
@@ -162,6 +168,9 @@
 <div class="layout">
   <Sidebar {view} needsCount={needs.length} {playlists} {syncing} onSelect={select} onCreatePlaylist={createPlaylist} />
   <main>
+    {#if libraryUnavailable}
+      <p class="banner">{libraryUnavailable} <button class="link" onclick={() => select({ kind: 'settings' })}>Settings</button></p>
+    {/if}
     {#if selected}
       {#key selected.id}
         <AlbumDetail
@@ -241,4 +250,6 @@
   .crumbs { padding: 16px 24px 0; }
   .crumbs h2 { margin: 4px 0 0; font-size: 22px; }
   .back { border: none; background: none; color: var(--accent); padding: 0; }
+  .banner { margin: 0; padding: 8px 24px; background: var(--panel); border-bottom: 1px solid var(--border); color: var(--warn); }
+  .link { border: none; background: none; color: var(--accent); padding: 0; }
 </style>

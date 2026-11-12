@@ -31,14 +31,36 @@ pub fn run() {
                 eprintln!("{}", p.chars().map(|c| if c.is_ascii() { c } else { '?' }).collect::<String>());
             }
             let default_root = app.path().audio_dir()?.join("HeckTunes");
-            let root = settings.library_root.clone().unwrap_or_else(|| default_root.clone());
-            let startup = settings.clone();
-            std::fs::create_dir_all(&root)?;
-            app.asset_protocol_scope().allow_directory(&root, true)?;
             let data_dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&data_dir)?;
+            let db_path = data_dir.join("library.db");
+            // The folder the library database last recorded: the fallback when settings.json
+            // is damaged or gone.
+            let recorded = Library::open(&db_path, default_root.clone())?.recorded_root()?;
+            let choice = settings::choose_library_root(
+                settings.library_root.as_deref(),
+                recorded.as_deref(),
+                &default_root,
+                |p| p.is_dir(),
+            );
+            let root = choice.root.clone();
+            // Only the default folder is ever created; a missing custom folder (a disconnected
+            // drive) leaves the library unavailable rather than recreating it somewhere empty.
+            if root == default_root {
+                std::fs::create_dir_all(&root)?;
+            }
+            if !choice.available {
+                eprintln!("library folder unavailable: {}", root.display().to_string().chars().map(|c| if c.is_ascii() { c } else { '?' }).collect::<String>());
+            }
+            if let Err(e) = app.asset_protocol_scope().allow_directory(&root, true) {
+                eprintln!("couldn't allow the library folder for artwork: {e}");
+            }
+            let startup = settings.clone();
+            let in_effect = settings::Settings { library_root: choice.custom.clone(), ..settings.clone() };
             let active_root = root.clone();
-            let lib = Arc::new(Mutex::new(Library::open(&data_dir.join("library.db"), root)?));
+            let library = Library::open(&db_path, root)?;
+            library.record_root(&active_root)?;
+            let lib = Arc::new(Mutex::new(library));
             // Settings file, then runtime env var, then the key baked in at build time.
             let key = settings::resolve_acoustid_key(
                 settings.acoustid_key,
@@ -59,8 +81,8 @@ pub fn run() {
                     let _ = player_handle.emit("player", status);
                 },
             );
-            let settings = commands::SettingsState { config_dir, default_root, active_root, startup, key_active };
-            app.manage(AppState { lib, queue, sync, player, settings });
+            let settings = commands::SettingsState { config_dir, default_root, active_root, startup, in_effect, key_active };
+            app.manage(AppState { lib, queue, sync, player, settings, library_available: choice.available });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

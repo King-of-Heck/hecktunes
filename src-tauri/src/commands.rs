@@ -16,21 +16,33 @@ pub struct AppState {
     pub sync: SyncService,
     pub player: crate::player::PlayerService,
     pub settings: SettingsState,
+    /// False when the library folder was missing at startup (e.g. its drive isn't connected):
+    /// commands that change the library or read its files for a sync refuse until a restart.
+    pub library_available: bool,
 }
 
 pub struct SettingsState {
     pub config_dir: PathBuf,
     pub default_root: PathBuf,
     pub active_root: PathBuf,
-    /// settings.json as it was when the app started (what is in effect now).
+    /// settings.json as it was when the app started.
     pub startup: Settings,
+    /// The settings in effect now: settings.json's, with the library folder actually chosen at
+    /// startup (which may come from the library database when settings.json is damaged).
+    pub in_effect: Settings,
     pub key_active: bool,
 }
 
 fn settings_view(state: &AppState, saved: &Settings, problem: Option<String>) -> CmdResult<SettingsView> {
     let s = &state.settings;
-    let albums = state.lib.lock().unwrap().list_albums().map_err(err)?.len();
-    Ok(settings::view(saved, &s.startup, &s.active_root, &s.default_root, s.key_active, problem, albums))
+    let albums = state.lib.lock().unwrap().album_count().map_err(err)?;
+    Ok(settings::view(saved, &s.startup, &s.active_root, &s.default_root, s.key_active, problem, albums, state.library_available))
+}
+
+/// settings.json to build a save on; a damaged file is replaced by the settings in effect now.
+fn settings_to_update(state: &AppState) -> Settings {
+    let (saved, problem) = settings::load_checked(&state.settings.config_dir);
+    settings::save_base(saved, problem.is_some(), &state.settings.in_effect)
 }
 
 #[tauri::command(async)]
@@ -41,17 +53,20 @@ pub fn get_settings(state: State<AppState>) -> CmdResult<SettingsView> {
 
 #[tauri::command(async)]
 pub fn set_library_root(state: State<AppState>, path: Option<String>) -> CmdResult<SettingsView> {
-    let (saved, _) = settings::load_checked(&state.settings.config_dir);
-    let albums = state.lib.lock().unwrap().list_albums().map_err(err)?.len();
-    let updated = settings::with_library_root(saved, path.map(PathBuf::from), albums).map_err(err)?;
+    let base = settings_to_update(&state);
+    let albums = state.lib.lock().unwrap().album_count().map_err(err)?;
+    let updated = settings::with_library_root(base, path.map(PathBuf::from), albums).map_err(err)?;
     settings::save(&state.settings.config_dir, &updated).map_err(err)?;
+    // The library is empty, so recording the new folder now loses nothing; it keeps a later
+    // fallback to the recorded folder from undoing this choice.
+    let next_root = updated.library_root.clone().unwrap_or_else(|| state.settings.default_root.clone());
+    state.lib.lock().unwrap().record_root(&next_root).map_err(err)?;
     settings_view(&state, &updated, None)
 }
 
 #[tauri::command(async)]
 pub fn set_acoustid_key(state: State<AppState>, key: Option<String>) -> CmdResult<SettingsView> {
-    let (saved, _) = settings::load_checked(&state.settings.config_dir);
-    let updated = settings::with_acoustid_key(saved, key);
+    let updated = settings::with_acoustid_key(settings_to_update(&state), key);
     settings::save(&state.settings.config_dir, &updated).map_err(err)?;
     settings_view(&state, &updated, None)
 }
@@ -76,6 +91,7 @@ pub fn album_tracks(state: State<AppState>, album_id: i64) -> CmdResult<Vec<Trac
 
 #[tauri::command(async)]
 pub fn import_paths(state: State<AppState>, paths: Vec<String>) -> CmdResult<()> {
+    library_ready(&state)?;
     state.queue.send(Command::Import(paths.into_iter().map(PathBuf::from).collect()));
     Ok(())
 }
@@ -89,6 +105,25 @@ fn library_change_allowed(syncing: bool) -> Result<(), String> {
     }
 }
 
+/// Nothing may write to or sync from a library folder that isn't there.
+fn library_usable(available: bool, root: &std::path::Path) -> Result<(), String> {
+    if available {
+        Ok(())
+    } else {
+        Err(settings::unavailable_message(root))
+    }
+}
+
+fn library_ready(state: &AppState) -> Result<(), String> {
+    library_usable(state.library_available, &state.settings.active_root)
+}
+
+/// Library files may change: the folder is there and no sync is reading it.
+fn library_change_ready(state: &AppState) -> Result<(), String> {
+    library_ready(state)?;
+    library_change_allowed(state.sync.is_running())
+}
+
 /// Skip and Search don't touch library files; every other choice does.
 fn choice_changes_library(choice: &JobChoice) -> bool {
     !matches!(choice, JobChoice::Skip | JobChoice::Search { .. })
@@ -97,7 +132,7 @@ fn choice_changes_library(choice: &JobChoice) -> bool {
 #[tauri::command(async)]
 pub fn resolve_job(state: State<AppState>, job_id: u64, choice: JobChoice) -> CmdResult<()> {
     if choice_changes_library(&choice) {
-        library_change_allowed(state.sync.is_running())?;
+        library_change_ready(&state)?;
     }
     state.queue.send(Command::Resolve { job_id, choice });
     Ok(())
@@ -105,19 +140,19 @@ pub fn resolve_job(state: State<AppState>, job_id: u64, choice: JobChoice) -> Cm
 
 #[tauri::command(async)]
 pub fn retry_metadata(state: State<AppState>, album_id: i64) -> CmdResult<u64> {
-    library_change_allowed(state.sync.is_running())?;
+    library_change_ready(&state)?;
     Ok(state.queue.reimport(album_id))
 }
 
 #[tauri::command(async)]
 pub fn update_album(state: State<AppState>, album_id: i64, edit: AlbumEdit) -> CmdResult<()> {
-    library_change_allowed(state.sync.is_running())?;
+    library_change_ready(&state)?;
     editing::apply_album_edit(&mut state.lib.lock().unwrap(), album_id, &edit).map_err(err)
 }
 
 #[tauri::command(async)]
 pub fn update_track(state: State<AppState>, track_id: i64, edit: TrackEdit) -> CmdResult<()> {
-    library_change_allowed(state.sync.is_running())?;
+    library_change_ready(&state)?;
     editing::apply_track_edit(&mut state.lib.lock().unwrap(), track_id, &edit).map_err(err)
 }
 
@@ -129,7 +164,7 @@ pub fn list_songs(state: State<AppState>) -> CmdResult<Vec<SongRow>> {
 /// Removes the album from the library and deletes its folder in the library root.
 #[tauri::command(async)]
 pub fn delete_album(state: State<AppState>, album_id: i64) -> CmdResult<()> {
-    library_change_allowed(state.sync.is_running())?;
+    library_change_ready(&state)?;
     state.lib.lock().unwrap().delete_album(album_id, true).map_err(err)
 }
 
@@ -190,12 +225,14 @@ pub fn list_volumes() -> Vec<Volume> {
 
 #[tauri::command(async)]
 pub fn preview_sync(state: State<AppState>, card: String) -> CmdResult<PlanSummary> {
+    library_ready(&state)?;
     state.sync.preview(&PathBuf::from(card)).map_err(err)
 }
 
 /// Starts a sync in the background; progress arrives as "sync" events.
 #[tauri::command(async)]
 pub fn start_sync(app: AppHandle, state: State<AppState>, card: String) -> CmdResult<()> {
+    library_ready(&state)?;
     state
         .sync
         .start(PathBuf::from(card), move |event| {
@@ -251,6 +288,15 @@ mod guard_tests {
     fn library_changes_are_refused_only_while_syncing() {
         assert!(library_change_allowed(false).is_ok());
         assert_eq!(library_change_allowed(true).unwrap_err(), "Wait for the Echo Mini sync to finish first.");
+    }
+
+    #[test]
+    fn library_changes_are_refused_while_the_folder_is_unavailable() {
+        assert!(library_usable(true, std::path::Path::new("E:/Tunes")).is_ok());
+        assert_eq!(
+            library_usable(false, std::path::Path::new("E:/Tunes")).unwrap_err(),
+            "Your library folder E:/Tunes isn't available (is the drive connected?)"
+        );
     }
 
     #[test]
