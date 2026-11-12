@@ -11,7 +11,7 @@ A small desktop app that acts as iTunes for a Snowsky Echo Mini running [EchoPod
 Download the installer for your computer from the [Releases](../../releases) page:
 
 - **Windows:** `HeckTunes_x.y.z_x64_en-US.msi`. The build isn't signed, so Windows SmartScreen may warn you: choose **More info → Run anyway**.
-- **macOS (Apple silicon or Intel):** the matching `.dmg`. The build isn't signed, so the first time **right-click the app → Open → Open**.
+- **macOS (Apple silicon or Intel):** the matching `.dmg`. The build isn't signed, so the first time **right-click the app → Open → Open**. On Intel Macs echo-sync isn't available (EchoPod publishes no Intel build), so the player rescans the card after a sync.
 
 ## First run
 
