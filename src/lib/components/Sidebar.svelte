@@ -64,6 +64,8 @@
   <button class:active={is('device')} onclick={() => onSelect({ kind: 'device' })}>
     Echo Mini {#if syncing}<span class="badge sync">syncing</span>{/if}
   </button>
+  <div class="spacer"></div>
+  <button class:active={is('settings')} onclick={() => onSelect({ kind: 'settings' })}>Settings</button>
 </nav>
 
 <style>
@@ -79,5 +81,6 @@
   input { width: 100%; }
   .err { margin: 2px 8px; color: var(--danger); font-size: 12px; }
   .badge { background: var(--warn); color: #fff; border-radius: 10px; padding: 0 7px; font-size: 11px; }
+  .spacer { flex: 1; }
   .badge.sync { background: var(--accent); }
 </style>

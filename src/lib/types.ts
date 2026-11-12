@@ -170,7 +170,8 @@ export type View =
   | { kind: 'songs' }
   | { kind: 'needs_metadata' }
   | { kind: 'playlist'; id: number }
-  | { kind: 'device' };
+  | { kind: 'device' }
+  | { kind: 'settings' };
 
 export type PlayState = 'idle' | 'playing' | 'paused' | 'ended' | 'error';
 
@@ -188,4 +189,15 @@ export interface QueueItem {
   title: string;
   artist: string;
   album_title: string;
+}
+
+export interface SettingsView {
+  library_root: string;
+  default_library_root: string;
+  saved_library_root: string | null;
+  acoustid_key: string | null;
+  acoustid_key_active: boolean;
+  restart_needed: boolean;
+  problem: string | null;
+  album_count: number;
 }

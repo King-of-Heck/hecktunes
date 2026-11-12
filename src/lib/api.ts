@@ -10,6 +10,7 @@ import type {
   PlayerStatus,
   PlaylistEntry,
   PlaylistRow,
+  SettingsView,
   Selection,
   SelectionKind,
   SongRow,
@@ -85,3 +86,7 @@ export const playerResume = () => invoke<void>('player_resume');
 export const playerSeek = (positionMs: number) => invoke<void>('player_seek', { positionMs: Math.max(0, Math.round(positionMs)) });
 export const playerStop = () => invoke<void>('player_stop');
 export const onPlayer = (cb: (s: PlayerStatus) => void): Promise<UnlistenFn> => listen<PlayerStatus>('player', (e) => cb(e.payload));
+
+export const getSettings = () => invoke<SettingsView>('get_settings');
+export const setLibraryRoot = (path: string | null) => invoke<SettingsView>('set_library_root', { path });
+export const setAcoustidKey = (key: string | null) => invoke<SettingsView>('set_acoustid_key', { key });

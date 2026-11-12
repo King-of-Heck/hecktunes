@@ -15,6 +15,7 @@
   import PlaylistView from './lib/components/PlaylistView.svelte';
   import DropOverlay from './lib/components/DropOverlay.svelte';
   import ImportTray from './lib/components/ImportTray.svelte';
+  import SettingsPage from './lib/components/SettingsView.svelte';
 
   let view = $state<View>({ kind: 'albums' });
   let albums = $state<AlbumRow[]>([]);
@@ -201,6 +202,8 @@
       {/if}
     {:else if view.kind === 'device'}
       <SyncPanel {albums} {playlists} {syncEvent} onClearResult={() => (syncEvent = null)} />
+    {:else if view.kind === 'settings'}
+      <SettingsPage />
     {:else}
       {#if artistName !== null}
         <div class="crumbs">
