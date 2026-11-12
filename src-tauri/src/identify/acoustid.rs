@@ -1,4 +1,5 @@
-use crate::identify::musicbrainz::{http_agent, RateLimiter, USER_AGENT};
+use crate::identify::musicbrainz::{http_agent, RateLimiter};
+use crate::identify::net::{user_agent, with_retry};
 use anyhow::Result;
 use serde_json::Value;
 use std::time::Duration;
@@ -59,9 +60,15 @@ impl AcoustId {
     }
 
     pub fn lookup(&self, fingerprint: &str, duration_secs: u32) -> Result<Vec<String>> {
-        self.limiter.wait();
         let url = lookup_url(&self.key, duration_secs, fingerprint);
-        let v: Value = self.agent.get(&url).header("User-Agent", USER_AGENT).call()?.body_mut().read_json()?;
+        let mut resp = with_retry(
+            || {
+                self.limiter.wait();
+                self.agent.get(&url).header("User-Agent", user_agent()).call()
+            },
+            std::thread::sleep,
+        )?;
+        let v: Value = resp.body_mut().read_json()?;
         Ok(parse_lookup(&v))
     }
 }

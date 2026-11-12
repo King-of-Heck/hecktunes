@@ -19,9 +19,21 @@ pub enum JobState {
     NeedsChoice { candidates: Vec<ReleaseCandidate> },
     Duplicate { release: ReleaseCandidate, existing_album_id: i64 },
     Importing,
-    Done { album_id: i64, matched: bool },
+    Done {
+        album_id: i64,
+        matched: bool,
+        /// Why an import went in unmatched.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        note: Option<String>,
+    },
     Skipped,
     Failed { error: String },
+}
+
+const NOTE_NOT_FOUND: &str = "No match found online";
+
+fn offline_note(e: &anyhow::Error) -> String {
+    format!("Couldn't reach the music database ({e}). Use Fix metadata when you're online.")
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -179,7 +191,11 @@ impl Worker {
                 self.emit(job.id, &job.label, JobState::Failed { error: format!("{e:#}") })
             }
             // Network errors on a normal import: import with what we have and flag it.
-            Ok(Identification::NotFound) | Err(_) => self.finish_unmatched(job, true),
+            Err(e) => {
+                let note = offline_note(&e);
+                self.finish_unmatched(job, true, Some(note))
+            }
+            Ok(Identification::NotFound) => self.finish_unmatched(job, true, Some(NOTE_NOT_FOUND.into())),
         }
     }
 
@@ -196,7 +212,7 @@ impl Worker {
         self.finalize(job, Some(release), replace);
     }
 
-    fn finish_unmatched(&mut self, job: Job, needs_metadata: bool) {
+    fn finish_unmatched(&mut self, job: Job, needs_metadata: bool, note: Option<String>) {
         if job.replace_album_id.is_some() {
             // Re-identify found nothing new: leave the album as it is.
             self.emit(job.id, &job.label, JobState::Skipped);
@@ -208,7 +224,7 @@ impl Worker {
         let result = stage(&self.root, &job.group, None, cover, needs_metadata)
             .and_then(|staged| staged.commit(&mut self.lib.lock().unwrap()));
         match result {
-            Ok(album_id) => self.emit(job.id, &job.label, JobState::Done { album_id, matched: false }),
+            Ok(album_id) => self.emit(job.id, &job.label, JobState::Done { album_id, matched: false, note }),
             Err(e) => self.emit(job.id, &job.label, JobState::Failed { error: format!("{e:#}") }),
         }
     }
@@ -235,7 +251,7 @@ impl Worker {
         }
         drop(lib);
         match result {
-            Ok(album_id) => self.emit(job.id, &job.label, JobState::Done { album_id, matched: release.is_some() }),
+            Ok(album_id) => self.emit(job.id, &job.label, JobState::Done { album_id, matched: release.is_some(), note: None }),
             Err(e) => self.emit(job.id, &job.label, JobState::Failed { error: format!("{e:#}") }),
         }
     }
@@ -246,7 +262,7 @@ impl Worker {
             JobChoice::Skip => self.emit(job.id, &job.label, JobState::Skipped),
             // On a duplicate prompt, keeping the existing album means leaving the library alone.
             JobChoice::KeepExisting if job.chosen.is_some() => self.emit(job.id, &job.label, JobState::Skipped),
-            JobChoice::KeepExisting => self.finish_unmatched(job, false),
+            JobChoice::KeepExisting => self.finish_unmatched(job, false, None),
             JobChoice::Replace => {
                 let release = job.chosen.take();
                 let existing = release.as_ref().and_then(|r| self.lib.lock().unwrap().find_other_album_by_release(&r.mbid, job.replace_album_id).ok().flatten());
@@ -501,6 +517,40 @@ mod tests {
         }
     }
 
+    impl FlakySource {
+        /// Every lookup fails, as when the machine is offline.
+        fn offline() -> Self {
+            FlakySource { inner: fake(&[], vec![]), fail_search: true, fail_search_text: true }
+        }
+    }
+
+    #[test]
+    fn unmatched_imports_say_why() {
+        let h = harness(fake(&[], vec![]));
+        h.queue.send(Command::Import(vec![h.src.clone()]));
+        match until(&h.rx, is_terminal).last().unwrap().state.clone() {
+            JobState::Done { matched: false, note: Some(n), .. } => assert_eq!(n, "No match found online"),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn imports_while_offline_say_so() {
+        let h = harness(fake(&[], vec![]));
+        let (q2, rx2) = start_queue(h.lib.clone(), FlakySource::offline());
+        q2.send(Command::Import(vec![h.src.clone()]));
+        match until(&rx2, is_terminal).last().unwrap().state.clone() {
+            JobState::Done { matched: false, note: Some(n), .. } => assert!(n.starts_with("Couldn't reach the music database"), "{n}"),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn done_without_a_note_has_no_note_field() {
+        let v = serde_json::to_value(JobState::Done { album_id: 1, matched: true, note: None }).unwrap();
+        assert!(v.get("note").is_none());
+    }
+
     /// FakeSource whose `cover` call (made just before staging) signals the test and then stalls,
     /// giving the test time to take the library lock the way a concurrent update command would.
     struct GateSource {
@@ -574,7 +624,7 @@ mod tests {
         h.queue.send(Command::Import(vec![h.src.clone()]));
         let ups = until(&h.rx, is_terminal);
         match ups.last().unwrap().state {
-            JobState::Done { album_id, matched: false } => album_id,
+            JobState::Done { album_id, matched: false, .. } => album_id,
             ref other => panic!("expected unmatched Done, got {other:?}"),
         }
     }
@@ -617,7 +667,7 @@ mod tests {
         let (q2, rx2) = start_queue(h.lib.clone(), fake(&["m1"], vec![candidate("m1", "Album", "Band", &TL)]));
         q2.send(Command::Import(vec![other]));
         let y = match until(&rx2, is_terminal).last().unwrap().state {
-            JobState::Done { album_id, matched: true } => album_id,
+            JobState::Done { album_id, matched: true, .. } => album_id,
             ref other => panic!("expected matched Done, got {other:?}"),
         };
 
@@ -666,7 +716,7 @@ mod tests {
         let ups = until(&rx2, is_terminal);
         drop(guard);
         let new_id = match ups.last().unwrap().state {
-            JobState::Done { album_id, matched: true } => album_id,
+            JobState::Done { album_id, matched: true, .. } => album_id,
             ref other => panic!("expected matched Done despite cleanup failure, got {other:?}"),
         };
         let lib = h.lib.lock().unwrap();
@@ -749,7 +799,7 @@ mod tests {
 
     #[test]
     fn job_update_serializes_flat_for_the_ui() {
-        let u = JobUpdate { job_id: 3, label: "L".into(), state: JobState::Done { album_id: 7, matched: true } };
+        let u = JobUpdate { job_id: 3, label: "L".into(), state: JobState::Done { album_id: 7, matched: true, note: None } };
         let v = serde_json::to_value(&u).unwrap();
         assert_eq!(v, serde_json::json!({"job_id": 3, "label": "L", "state": "done", "album_id": 7, "matched": true}));
         let c: JobChoice = serde_json::from_value(serde_json::json!({"kind": "pick", "mbid": "x"})).unwrap();

@@ -13,7 +13,7 @@
     failed: 'Failed',
   };
   function detail(j: JobUpdate): string {
-    if (j.state === 'done' && !j.matched) return 'Added — no match found';
+    if (j.state === 'done' && !j.matched) return j.note ? `Added — ${j.note}` : 'Added — no match found';
     if (j.state === 'failed') return `Failed: ${j.error}`;
     return text[j.state];
   }
@@ -30,7 +30,7 @@
       {#each jobs as j (j.job_id)}
         <li class={j.state}>
           <span class="label">{j.label}</span>
-          <span class="state">{detail(j)}</span>
+          <span class="state" title={detail(j)}>{detail(j)}</span>
         </li>
       {/each}
     </ul>

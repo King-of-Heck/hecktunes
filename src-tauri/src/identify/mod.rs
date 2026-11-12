@@ -1,6 +1,7 @@
 pub mod acoustid;
 pub mod fingerprint;
 pub mod musicbrainz;
+pub mod net;
 pub mod score;
 
 use crate::model::{ReleaseCandidate, SourceTrack};
@@ -36,16 +37,27 @@ pub fn rank(tracks: &[SourceTrack], candidates: Vec<ReleaseCandidate>) -> Vec<Re
 
 pub fn identify(tracks: &[SourceTrack], source: &dyn MetadataSource) -> Result<Identification> {
     let ev = AlbumEvidence::from_tracks(tracks);
+    let mut last_err: Option<anyhow::Error> = None;
     let mut ids: Vec<String> = Vec::new();
     if let (Some(album), Some(artist)) = (&ev.album, &ev.artist) {
-        ids = source.search(album, artist, tracks.len())?;
+        match source.search(album, artist, tracks.len()) {
+            Ok(found) => ids = found,
+            Err(e) => last_err = Some(e),
+        }
     }
     if ids.is_empty() {
         // Rank by how many fingerprinted tracks agree on a release (stable: ties keep first-seen order).
         let mut counts: Vec<(String, usize)> = Vec::new();
         for t in tracks.iter().take(3) {
+            let found = match source.by_fingerprint(t) {
+                Ok(found) => found,
+                Err(e) => {
+                    last_err = Some(e);
+                    continue;
+                }
+            };
             let mut seen: Vec<String> = Vec::new();
-            for id in source.by_fingerprint(t).unwrap_or_default() {
+            for id in found {
                 if seen.contains(&id) {
                     continue;
                 }
@@ -60,9 +72,18 @@ pub fn identify(tracks: &[SourceTrack], source: &dyn MetadataSource) -> Result<I
         ids = counts.into_iter().map(|(id, _)| id).collect();
     }
     ids.truncate(MAX_CANDIDATES);
-    let candidates: Vec<ReleaseCandidate> = ids.iter().filter_map(|id| source.release(id).ok()).collect();
+    let mut candidates = Vec::new();
+    for id in &ids {
+        match source.release(id) {
+            Ok(r) => candidates.push(r),
+            Err(e) => last_err = Some(e),
+        }
+    }
     if candidates.is_empty() {
-        return Ok(Identification::NotFound);
+        return match last_err {
+            Some(e) => Err(e),
+            None => Ok(Identification::NotFound),
+        };
     }
     let ranked = rank(tracks, candidates);
     let scores: Vec<f64> = ranked.iter().map(|c| score(&ev, c)).collect();
@@ -112,7 +133,7 @@ impl MetadataSource for OnlineSource {
 
     fn cover(&self, mbid: &str) -> Result<Option<Vec<u8>>> {
         let url = cover_url(mbid);
-        match self.agent.get(&url).header("User-Agent", musicbrainz::USER_AGENT).call() {
+        match net::with_retry(|| self.agent.get(&url).header("User-Agent", net::user_agent()).call(), std::thread::sleep) {
             Ok(mut resp) => Ok(Some(resp.body_mut().read_to_vec()?)),
             Err(ureq::Error::StatusCode(404)) => Ok(None),
             Err(e) => Err(e.into()),
@@ -148,14 +169,89 @@ mod tests {
 
     const TL: [(&str, u64); 2] = [("One", 100_000), ("Two", 200_000)];
 
+    /// Two tagged tracks and release "a", which matches them exactly.
+    fn matching_tracks_and_release() -> ([SourceTrack; 2], ReleaseCandidate) {
+        (
+            [src(Some("One"), Some("Album"), Some("Band"), 100_000), src(Some("Two"), Some("Album"), Some("Band"), 200_000)],
+            candidate("a", "Album", "Band", &TL),
+        )
+    }
+
     #[test]
     fn matches_a_clear_winner() {
-        let fake = FakeSource { releases: vec![candidate("good", "Album", "Band", &TL)], search_ids: vec!["good".into()] };
-        let tracks = [src(Some("One"), Some("Album"), Some("Band"), 100_000), src(Some("Two"), Some("Album"), Some("Band"), 200_000)];
+        let (tracks, release) = matching_tracks_and_release();
+        let fake = FakeSource { releases: vec![release], search_ids: vec!["a".into()] };
         match identify(&tracks, &fake).unwrap() {
-            Identification::Matched(r) => assert_eq!(r.mbid, "good"),
+            Identification::Matched(r) => assert_eq!(r.mbid, "a"),
             other => panic!("expected match, got {other:?}"),
         }
+    }
+
+    /// FakeSource whose text search, fingerprint lookups and/or release fetches fail.
+    struct Failing {
+        inner: FakeSource,
+        search_fails: bool,
+        fingerprint_ids: Vec<String>,
+        fingerprint_fails: bool,
+        release_fails: bool,
+    }
+
+    impl MetadataSource for Failing {
+        fn search(&self, a: &str, b: &str, n: usize) -> Result<Vec<String>> {
+            if self.search_fails { anyhow::bail!("search offline") } else { self.inner.search(a, b, n) }
+        }
+        fn search_text(&self, q: &str) -> Result<Vec<String>> {
+            self.inner.search_text(q)
+        }
+        fn by_fingerprint(&self, _t: &SourceTrack) -> Result<Vec<String>> {
+            if self.fingerprint_fails { anyhow::bail!("acoustid offline") } else { Ok(self.fingerprint_ids.clone()) }
+        }
+        fn release(&self, id: &str) -> Result<ReleaseCandidate> {
+            if self.release_fails { anyhow::bail!("release offline") } else { self.inner.release(id) }
+        }
+        fn cover(&self, m: &str) -> Result<Option<Vec<u8>>> {
+            self.inner.cover(m)
+        }
+    }
+
+    #[test]
+    fn a_failing_search_falls_back_to_fingerprints() {
+        let (tracks, release_a) = matching_tracks_and_release();
+        let src = Failing {
+            inner: FakeSource { releases: vec![release_a], search_ids: vec![] },
+            search_fails: true,
+            fingerprint_ids: vec!["a".into()],
+            fingerprint_fails: false,
+            release_fails: false,
+        };
+        assert!(matches!(identify(&tracks, &src).unwrap(), Identification::Matched(_) | Identification::Ambiguous(_)));
+    }
+
+    #[test]
+    fn nothing_found_because_lookups_failed_is_an_error_not_not_found() {
+        let (tracks, release_a) = matching_tracks_and_release();
+        let src = Failing {
+            inner: FakeSource { releases: vec![release_a], search_ids: vec!["a".into()] },
+            search_fails: false,
+            fingerprint_ids: vec![],
+            fingerprint_fails: false,
+            release_fails: true,
+        };
+        let err = identify(&tracks, &src).unwrap_err();
+        assert!(format!("{err:#}").contains("release offline"));
+    }
+
+    #[test]
+    fn nothing_found_without_errors_is_not_found() {
+        let (tracks, _) = matching_tracks_and_release();
+        let src = Failing {
+            inner: FakeSource { releases: vec![], search_ids: vec![] },
+            search_fails: false,
+            fingerprint_ids: vec![],
+            fingerprint_fails: false,
+            release_fails: false,
+        };
+        assert!(matches!(identify(&tracks, &src).unwrap(), Identification::NotFound));
     }
 
     #[test]

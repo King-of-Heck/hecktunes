@@ -1,3 +1,4 @@
+use super::net::{user_agent, with_retry};
 use crate::model::{CandidateTrack, ReleaseCandidate};
 use anyhow::{anyhow, Result};
 use serde_json::Value;
@@ -6,7 +7,6 @@ use std::sync::Mutex;
 use std::thread;
 use std::time::{Duration, Instant};
 
-pub const USER_AGENT: &str = concat!("HeckTunes/", env!("CARGO_PKG_VERSION"), " ( hecktunes-app )");
 const BASE: &str = "https://musicbrainz.org/ws/2";
 
 /// Shared HTTP agent config: 30 s overall timeout so a stuck request can't hang the import worker.
@@ -154,22 +154,18 @@ impl MusicBrainz {
     }
 
     fn get_json(&self, url: &str, query: &[(&str, &str)]) -> Result<Value> {
-        let mut attempt = 0;
-        loop {
-            self.limiter.wait();
-            let mut req = self.agent.get(url).header("User-Agent", USER_AGENT).header("Accept", "application/json");
-            for (k, v) in query {
-                req = req.query(*k, *v);
-            }
-            match req.call() {
-                Ok(mut resp) => return Ok(resp.body_mut().read_json::<Value>()?),
-                Err(ureq::Error::StatusCode(503)) if attempt < 3 => {
-                    attempt += 1;
-                    thread::sleep(Duration::from_secs(2 * attempt));
+        let mut resp = with_retry(
+            || {
+                self.limiter.wait();
+                let mut req = self.agent.get(url).header("User-Agent", user_agent()).header("Accept", "application/json");
+                for (k, v) in query {
+                    req = req.query(*k, *v);
                 }
-                Err(e) => return Err(e.into()),
-            }
-        }
+                req.call()
+            },
+            thread::sleep,
+        )?;
+        Ok(resp.body_mut().read_json::<Value>()?)
     }
 
     pub fn search_releases(&self, album: &str, artist: &str) -> Result<Vec<SearchHit>> {

@@ -72,7 +72,7 @@ export type JobState =
   | { state: 'needs_choice'; candidates: ReleaseCandidate[] }
   | { state: 'duplicate'; release: ReleaseCandidate; existing_album_id: number }
   | { state: 'importing' }
-  | { state: 'done'; album_id: number; matched: boolean }
+  | { state: 'done'; album_id: number; matched: boolean; note?: string }
   | { state: 'skipped' }
   | { state: 'failed'; error: string };
 
