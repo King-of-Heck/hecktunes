@@ -48,6 +48,28 @@ fn lookup_url(key: &str, duration_secs: u32, fingerprint: &str) -> String {
     )
 }
 
+/// AcoustID refused the request because of the client key (HTTP 400/401/403).
+#[derive(Debug)]
+pub struct KeyRejected {
+    pub status: u16,
+}
+
+impl std::fmt::Display for KeyRejected {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "AcoustID rejected the key (HTTP {})", self.status)
+    }
+}
+
+impl std::error::Error for KeyRejected {}
+
+/// Wraps a lookup failure, turning a key rejection into `KeyRejected`.
+pub fn lookup_error(e: ureq::Error) -> anyhow::Error {
+    match e {
+        ureq::Error::StatusCode(status @ (400 | 401 | 403)) => KeyRejected { status }.into(),
+        other => other.into(),
+    }
+}
+
 pub struct AcoustId {
     agent: ureq::Agent,
     key: String,
@@ -67,7 +89,8 @@ impl AcoustId {
                 self.agent.get(&url).header("User-Agent", user_agent()).call()
             },
             std::thread::sleep,
-        )?;
+        )
+        .map_err(lookup_error)?;
         let v: Value = resp.body_mut().read_json()?;
         Ok(parse_lookup(&v))
     }
@@ -95,5 +118,19 @@ mod tests {
     fn error_status_yields_nothing() {
         let v: Value = serde_json::json!({"status": "error", "error": {"message": "invalid API key"}});
         assert!(parse_lookup(&v).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod error_tests {
+    use super::*;
+
+    #[test]
+    fn rejected_keys_are_told_apart_from_other_errors() {
+        for code in [400, 401, 403] {
+            assert!(lookup_error(ureq::Error::StatusCode(code)).downcast_ref::<KeyRejected>().is_some(), "{code}");
+        }
+        assert!(lookup_error(ureq::Error::StatusCode(500)).downcast_ref::<KeyRejected>().is_none());
+        assert!(lookup_error(ureq::Error::ConnectionFailed).downcast_ref::<ureq::Error>().is_some());
     }
 }

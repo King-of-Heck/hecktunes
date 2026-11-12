@@ -13,6 +13,12 @@ pub fn is_transient(e: &ureq::Error) -> bool {
     }
 }
 
+/// True when a ureq error anywhere in `e`'s chain is a network failure (one `is_transient` would
+/// retry): the music database couldn't be reached, as opposed to answering with an error.
+pub fn is_network_failure(e: &anyhow::Error) -> bool {
+    e.chain().any(|c| c.downcast_ref::<ureq::Error>().is_some_and(is_transient))
+}
+
 /// Calls `f`, retrying transient failures up to `MAX_RETRIES` times with 2 s, 4 s, 6 s pauses.
 /// `sleep` is injected so tests don't wait.
 pub fn with_retry<T>(mut f: impl FnMut() -> Result<T, ureq::Error>, sleep: impl Fn(Duration)) -> Result<T, ureq::Error> {
@@ -104,5 +110,19 @@ mod tests {
         let ua = user_agent();
         assert!(ua.starts_with(&format!("HeckTunes/{} ( ", env!("CARGO_PKG_VERSION"))), "{ua}");
         assert!(ua.ends_with(" )"), "{ua}");
+    }
+}
+
+#[cfg(test)]
+mod failure_tests {
+    use super::*;
+
+    #[test]
+    fn network_failures_are_found_through_the_error_chain() {
+        let e = anyhow::Error::from(ureq::Error::ConnectionFailed).context("release lookup").context("identify");
+        assert!(is_network_failure(&e));
+        assert!(is_network_failure(&anyhow::Error::from(ureq::Error::StatusCode(503))));
+        assert!(!is_network_failure(&anyhow::Error::from(ureq::Error::StatusCode(404)).context("release lookup")));
+        assert!(!is_network_failure(&anyhow::anyhow!("bad JSON")));
     }
 }

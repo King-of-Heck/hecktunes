@@ -39,9 +39,12 @@ pub fn identify(tracks: &[SourceTrack], source: &dyn MetadataSource) -> Result<I
     let ev = AlbumEvidence::from_tracks(tracks);
     let mut last_err: Option<anyhow::Error> = None;
     let mut ids: Vec<String> = Vec::new();
+    // Once the music database proves unreachable, later lookups would only wait out their own
+    // retries: give up at once so an offline import takes one retry cycle.
     if let (Some(album), Some(artist)) = (&ev.album, &ev.artist) {
         match source.search(album, artist, tracks.len()) {
             Ok(found) => ids = found,
+            Err(e) if net::is_network_failure(&e) => return Err(e),
             Err(e) => last_err = Some(e),
         }
     }
@@ -51,6 +54,7 @@ pub fn identify(tracks: &[SourceTrack], source: &dyn MetadataSource) -> Result<I
         for t in tracks.iter().take(3) {
             let found = match source.by_fingerprint(t) {
                 Ok(found) => found,
+                Err(e) if net::is_network_failure(&e) => return Err(e),
                 Err(e) => {
                     last_err = Some(e);
                     continue;
@@ -76,6 +80,7 @@ pub fn identify(tracks: &[SourceTrack], source: &dyn MetadataSource) -> Result<I
     for id in &ids {
         match source.release(id) {
             Ok(r) => candidates.push(r),
+            Err(e) if net::is_network_failure(&e) => return Err(e),
             Err(e) => last_err = Some(e),
         }
     }
@@ -123,7 +128,14 @@ impl MetadataSource for OnlineSource {
 
     fn by_fingerprint(&self, track: &SourceTrack) -> Result<Vec<String>> {
         let Some(client) = &self.acoustid else { return Ok(vec![]) };
-        let fp = fingerprint::fingerprint_file(&track.path)?;
+        // A file we can't decode (e.g. Opus) just has no fingerprint matches; it is not a lookup failure.
+        let fp = match fingerprint::fingerprint_file(&track.path) {
+            Ok(fp) => fp,
+            Err(e) => {
+                eprintln!("no fingerprint for {}: {}", ascii(&track.path.display().to_string()), ascii(&format!("{e:#}")));
+                return Ok(vec![]);
+            }
+        };
         client.lookup(&fp, (track.duration_ms / 1000) as u32)
     }
 
@@ -139,6 +151,11 @@ impl MetadataSource for OnlineSource {
             Err(e) => Err(e.into()),
         }
     }
+}
+
+/// Console-safe copy of `s`: non-ASCII characters become '?'.
+fn ascii(s: &str) -> String {
+    s.chars().map(|c| if c.is_ascii() { c } else { '?' }).collect()
 }
 
 /// Cover Art Archive front image. The 1200 px thumbnail (not 500) so `prepare_cover` can produce a
@@ -356,5 +373,138 @@ mod tests {
     #[test]
     fn cover_url_asks_for_an_image_at_least_600_px() {
         assert_eq!(cover_url("abc"), "https://coverartarchive.org/release/abc/front-1200");
+    }
+}
+
+#[cfg(test)]
+mod failure_tests {
+    use super::*;
+    use crate::test_support::{candidate, FakeSource};
+    use std::sync::Mutex;
+
+    #[derive(Clone, Copy, PartialEq)]
+    enum Fail {
+        No,
+        Net,
+        Other,
+    }
+
+    fn err(kind: Fail, what: &str) -> anyhow::Error {
+        match kind {
+            Fail::Net => anyhow::Error::from(ureq::Error::ConnectionFailed).context(format!("{what} lookup")),
+            _ => anyhow::anyhow!("{what} broke"),
+        }
+    }
+
+    /// Fake source that counts calls per lookup kind and fails the chosen ones.
+    struct Counting {
+        inner: FakeSource,
+        search: Fail,
+        fingerprint: Fail,
+        fingerprint_ids: Vec<String>,
+        release: Fail,
+        calls: Mutex<[usize; 3]>,
+    }
+
+    impl Counting {
+        fn new(inner: FakeSource) -> Self {
+            Counting { inner, search: Fail::No, fingerprint: Fail::No, fingerprint_ids: vec![], release: Fail::No, calls: Mutex::new([0; 3]) }
+        }
+        fn calls(&self) -> [usize; 3] {
+            *self.calls.lock().unwrap()
+        }
+    }
+
+    impl MetadataSource for Counting {
+        fn search(&self, a: &str, b: &str, n: usize) -> Result<Vec<String>> {
+            self.calls.lock().unwrap()[0] += 1;
+            if self.search != Fail::No { return Err(err(self.search, "search")) }
+            self.inner.search(a, b, n)
+        }
+        fn search_text(&self, q: &str) -> Result<Vec<String>> {
+            self.inner.search_text(q)
+        }
+        fn by_fingerprint(&self, _t: &SourceTrack) -> Result<Vec<String>> {
+            self.calls.lock().unwrap()[1] += 1;
+            if self.fingerprint != Fail::No { return Err(err(self.fingerprint, "fingerprint")) }
+            Ok(self.fingerprint_ids.clone())
+        }
+        fn release(&self, id: &str) -> Result<ReleaseCandidate> {
+            self.calls.lock().unwrap()[2] += 1;
+            if self.release != Fail::No { return Err(err(self.release, "release")) }
+            self.inner.release(id)
+        }
+        fn cover(&self, m: &str) -> Result<Option<Vec<u8>>> {
+            self.inner.cover(m)
+        }
+    }
+
+    fn track(path: &str, tagged: bool) -> SourceTrack {
+        SourceTrack {
+            path: path.into(),
+            title: Some("One".into()),
+            artist: tagged.then(|| "Band".into()),
+            album: tagged.then(|| "Album".into()),
+            album_artist: None,
+            track_no: None,
+            disc_no: None,
+            year: None,
+            genre: None,
+            duration_ms: 100_000,
+        }
+    }
+
+    fn three(tagged: bool) -> Vec<SourceTrack> {
+        vec![track("a.wav", tagged), track("b.wav", tagged), track("c.wav", tagged)]
+    }
+
+    #[test]
+    fn a_network_failure_on_search_stops_at_once() {
+        let mut s = Counting::new(FakeSource { releases: vec![], search_ids: vec![] });
+        s.search = Fail::Net;
+        s.fingerprint_ids = vec!["a".into()];
+        let e = identify(&three(true), &s).unwrap_err();
+        assert!(net::is_network_failure(&e), "{e:#}");
+        assert_eq!(s.calls(), [1, 0, 0], "an offline import must not go on to fingerprint and release lookups");
+    }
+
+    #[test]
+    fn a_network_failure_on_fingerprints_is_tried_once() {
+        let mut s = Counting::new(FakeSource { releases: vec![], search_ids: vec![] });
+        s.fingerprint = Fail::Net;
+        let e = identify(&three(false), &s).unwrap_err();
+        assert!(net::is_network_failure(&e), "{e:#}");
+        assert_eq!(s.calls(), [0, 1, 0]);
+    }
+
+    #[test]
+    fn a_network_failure_on_releases_is_tried_once() {
+        let tl = [("One", 100_000)];
+        let releases = vec![candidate("a", "Album", "Band", &tl), candidate("b", "Album", "Band", &tl)];
+        let mut s = Counting::new(FakeSource { releases, search_ids: vec!["a".into(), "b".into()] });
+        s.release = Fail::Net;
+        let e = identify(&three(true), &s).unwrap_err();
+        assert!(net::is_network_failure(&e), "{e:#}");
+        assert_eq!(s.calls(), [1, 0, 1]);
+    }
+
+    #[test]
+    fn other_lookup_failures_still_try_the_rest() {
+        let mut s = Counting::new(FakeSource { releases: vec![], search_ids: vec![] });
+        s.search = Fail::Other;
+        s.fingerprint = Fail::Other;
+        let e = identify(&three(true), &s).unwrap_err();
+        assert!(!net::is_network_failure(&e), "{e:#}");
+        assert_eq!(s.calls(), [1, 3, 0]);
+    }
+
+    #[test]
+    fn an_undecodable_file_has_no_fingerprint_matches_rather_than_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("song.opus");
+        std::fs::write(&path, b"definitely not audio").unwrap();
+        let src = OnlineSource::new(Some("key".into()));
+        let found = src.by_fingerprint(&track(path.to_str().unwrap(), false)).unwrap();
+        assert!(found.is_empty());
     }
 }

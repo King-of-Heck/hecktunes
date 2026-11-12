@@ -1,3 +1,5 @@
+use crate::identify::acoustid::KeyRejected;
+use crate::identify::net::is_network_failure;
 use crate::identify::{identify, rank, Identification, MetadataSource};
 use crate::import::apply::{pick_cover, stage};
 use crate::import::scan::{scan_paths, scan_paths_excluding, AlbumGroup};
@@ -32,8 +34,15 @@ pub enum JobState {
 
 const NOTE_NOT_FOUND: &str = "No match found online";
 
-fn offline_note(e: &anyhow::Error) -> String {
-    format!("Couldn't reach the music database ({e}). Use Fix metadata when you're online.")
+/// Why an import went in unmatched after a failed lookup.
+fn lookup_failure_note(e: &anyhow::Error) -> String {
+    if e.chain().any(|c| c.downcast_ref::<KeyRejected>().is_some()) {
+        "AcoustID rejected the key \u{2014} check it in Settings.".into()
+    } else if is_network_failure(e) {
+        format!("Couldn't reach the music database ({e:#}). Use Fix metadata when you're online.")
+    } else {
+        format!("The music database lookup failed ({e:#}).")
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -190,9 +199,9 @@ impl Worker {
             Err(e) if job.replace_album_id.is_some() => {
                 self.emit(job.id, &job.label, JobState::Failed { error: format!("{e:#}") })
             }
-            // Network errors on a normal import: import with what we have and flag it.
+            // Lookup errors on a normal import: import with what we have and say why.
             Err(e) => {
-                let note = offline_note(&e);
+                let note = lookup_failure_note(&e);
                 self.finish_unmatched(job, true, Some(note))
             }
             Ok(Identification::NotFound) => self.finish_unmatched(job, true, Some(NOTE_NOT_FOUND.into())),
@@ -491,12 +500,15 @@ mod tests {
         inner: FakeSource,
         fail_search: bool,
         fail_search_text: bool,
+        /// Calls to search, by_fingerprint and release.
+        calls: Arc<Mutex<[usize; 3]>>,
     }
 
     impl MetadataSource for FlakySource {
         fn search(&self, album: &str, artist: &str, n: usize) -> anyhow::Result<Vec<String>> {
+            self.calls.lock().unwrap()[0] += 1;
             if self.fail_search {
-                anyhow::bail!("network down");
+                return Err(anyhow::Error::from(ureq::Error::HostNotFound).context("network down"));
             }
             self.inner.search(album, artist, n)
         }
@@ -507,9 +519,14 @@ mod tests {
             self.inner.search_text(query)
         }
         fn by_fingerprint(&self, t: &crate::model::SourceTrack) -> anyhow::Result<Vec<String>> {
+            self.calls.lock().unwrap()[1] += 1;
+            if self.fail_search {
+                return Err(anyhow::Error::from(ureq::Error::HostNotFound).context("network down"));
+            }
             self.inner.by_fingerprint(t)
         }
         fn release(&self, mbid: &str) -> anyhow::Result<ReleaseCandidate> {
+            self.calls.lock().unwrap()[2] += 1;
             self.inner.release(mbid)
         }
         fn cover(&self, mbid: &str) -> anyhow::Result<Option<Vec<u8>>> {
@@ -520,7 +537,7 @@ mod tests {
     impl FlakySource {
         /// Every lookup fails, as when the machine is offline.
         fn offline() -> Self {
-            FlakySource { inner: fake(&[], vec![]), fail_search: true, fail_search_text: true }
+            FlakySource { inner: fake(&[], vec![]), fail_search: true, fail_search_text: true, calls: Default::default() }
         }
     }
 
@@ -537,11 +554,34 @@ mod tests {
     #[test]
     fn imports_while_offline_say_so() {
         let h = harness(fake(&[], vec![]));
-        let (q2, rx2) = start_queue(h.lib.clone(), FlakySource::offline());
+        let offline = FlakySource::offline();
+        let calls = offline.calls.clone();
+        let (q2, rx2) = start_queue(h.lib.clone(), offline);
         q2.send(Command::Import(vec![h.src.clone()]));
         match until(&rx2, is_terminal).last().unwrap().state.clone() {
-            JobState::Done { matched: false, note: Some(n), .. } => assert!(n.starts_with("Couldn't reach the music database"), "{n}"),
+            JobState::Done { matched: false, note: Some(n), .. } => {
+                assert!(n.starts_with("Couldn't reach the music database (network down: "), "{n}");
+                assert!(n.ends_with("Use Fix metadata when you're online."), "{n}");
+            }
             other => panic!("{other:?}"),
+        }
+        // One network failure ends the lookup: no fingerprint or release lookups after it.
+        assert_eq!(*calls.lock().unwrap(), [1, 0, 0]);
+    }
+
+    #[test]
+    fn lookup_notes_tell_network_trouble_from_other_failures() {
+        let net = anyhow::Error::from(ureq::Error::ConnectionFailed).context("release lookup");
+        let note = lookup_failure_note(&net);
+        assert!(note.starts_with("Couldn't reach the music database (release lookup: "), "{note}");
+        assert!(note.ends_with("). Use Fix metadata when you're online."), "{note}");
+        let other = anyhow::anyhow!("bad JSON").context("release lookup");
+        assert_eq!(lookup_failure_note(&other), "The music database lookup failed (release lookup: bad JSON).");
+        let not_found = anyhow::Error::from(ureq::Error::StatusCode(404));
+        assert!(lookup_failure_note(&not_found).starts_with("The music database lookup failed ("));
+        for code in [400, 401, 403] {
+            let rejected = crate::identify::acoustid::lookup_error(ureq::Error::StatusCode(code));
+            assert_eq!(lookup_failure_note(&rejected), "AcoustID rejected the key \u{2014} check it in Settings.");
         }
     }
 
@@ -732,7 +772,7 @@ mod tests {
         let x = import_unmatched(&h);
         let (q2, rx2) = start_queue(
             h.lib.clone(),
-            FlakySource { inner: fake(&[], vec![]), fail_search: true, fail_search_text: false },
+            FlakySource { inner: fake(&[], vec![]), fail_search: true, fail_search_text: false, calls: Default::default() },
         );
         q2.reimport(x);
         let ups = until(&rx2, is_terminal);
@@ -748,7 +788,7 @@ mod tests {
         let h = harness(FakeSource { releases: vec![], search_ids: vec![] });
         let (q2, rx2) = start_queue(
             h.lib.clone(),
-            FlakySource { inner: fake(&[], vec![]), fail_search: true, fail_search_text: false },
+            FlakySource { inner: fake(&[], vec![]), fail_search: true, fail_search_text: false, calls: Default::default() },
         );
         q2.send(Command::Import(vec![h.src.clone()]));
         let ups = until(&rx2, is_terminal);
@@ -762,7 +802,7 @@ mod tests {
         let h = harness(FakeSource { releases: vec![], search_ids: vec![] });
         let (q2, rx2) = start_queue(
             h.lib.clone(),
-            FlakySource { inner: fake(&["a", "b"], releases), fail_search: false, fail_search_text: true },
+            FlakySource { inner: fake(&["a", "b"], releases), fail_search: false, fail_search_text: true, calls: Default::default() },
         );
         q2.send(Command::Import(vec![h.src.clone()]));
         let ups = until(&rx2, |s| matches!(s, JobState::NeedsChoice { .. }) || is_terminal(s));
