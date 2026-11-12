@@ -24,3 +24,4 @@ dist-ssr
 *.sw?
 src-tauri/target/
 src-tauri/binaries/
+src-tauri/licenses/echo-sync-LICENSE.txt

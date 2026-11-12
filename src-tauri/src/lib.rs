@@ -1,3 +1,4 @@
+pub mod about;
 pub mod artwork;
 pub mod commands;
 pub mod device;
@@ -94,6 +95,7 @@ pub fn run() {
             commands::get_settings,
             commands::set_library_root,
             commands::set_acoustid_key,
+            commands::about,
         ])
         .run(tauri::generate_context!())
         .expect("error while running HeckTunes");

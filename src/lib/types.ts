@@ -171,7 +171,8 @@ export type View =
   | { kind: 'needs_metadata' }
   | { kind: 'playlist'; id: number }
   | { kind: 'device' }
-  | { kind: 'settings' };
+  | { kind: 'settings' }
+  | { kind: 'about' };
 
 export type PlayState = 'idle' | 'playing' | 'paused' | 'ended' | 'error';
 
@@ -200,4 +201,13 @@ export interface SettingsView {
   restart_needed: boolean;
   problem: string | null;
   album_count: number;
+}
+
+export interface AboutInfo {
+  version: string;
+  echo_sync_version: string;
+  echo_sync_source: string;
+  echo_sync_license: string | null;
+  third_party_notices: string | null;
+  hecktunes_license: string | null;
 }

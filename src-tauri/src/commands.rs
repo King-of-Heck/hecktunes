@@ -215,3 +215,9 @@ pub fn player_seek(state: State<AppState>, position_ms: u64) {
 pub fn player_stop(state: State<AppState>) {
     state.player.stop();
 }
+
+#[tauri::command(async)]
+pub fn about(app: AppHandle) -> crate::about::AboutInfo {
+    use tauri::Manager;
+    crate::about::about(app.path().resource_dir().ok().as_deref())
+}

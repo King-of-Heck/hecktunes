@@ -16,6 +16,10 @@ const ASSETS = {
   'aarch64-apple-darwin': { name: 'echo-sync-macos-arm64', sha256: '62037dd5c0af6b0fd5a237f021a168fd174091acf25ed26f25d73d3bcf43f50a' },
   'x86_64-unknown-linux-gnu': { name: 'echo-sync-linux-x64', sha256: '15162a8814f4726170767e6f9c7c6cacd0de605bdbe50df1425d94d4c5d4e105' },
 };
+const LICENSE = {
+  url: `https://raw.githubusercontent.com/BasilSkyWalk/echopod/${VERSION}/LICENSE`,
+  sha256: '3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986',
+};
 // HeckTunes reads this exit code as "echo-sync isn't available on this platform".
 const NOT_AVAILABLE_EXIT = 3;
 
@@ -37,7 +41,29 @@ function hostTriple() {
 
 const sha256 = (buf) => createHash('sha256').update(buf).digest('hex');
 
+async function fetchLicense() {
+  const dir = join(dirname(fileURLToPath(import.meta.url)), '..', 'src-tauri', 'licenses');
+  const out = join(dir, 'echo-sync-LICENSE.txt');
+  mkdirSync(dir, { recursive: true });
+  if (existsSync(out)) {
+    if (sha256(readFileSync(out)) === LICENSE.sha256) return;
+    rmSync(out); // never keep an unverified copy
+  }
+  const res = await fetch(LICENSE.url);
+  if (!res.ok) throw new Error(`licence download failed: HTTP ${res.status}`);
+  const buf = Buffer.from(await res.arrayBuffer());
+  const got = sha256(buf);
+  if (got !== LICENSE.sha256) throw new Error(`checksum mismatch for echo-sync LICENSE: expected ${LICENSE.sha256}, got ${got}`);
+  writeFileSync(out, buf);
+  console.log(`echo-sync ${VERSION} licence saved to ${out}`);
+}
+
 async function main() {
+  await fetchBinary();
+  await fetchLicense();
+}
+
+async function fetchBinary() {
   const triple = targetArg ?? process.env.TAURI_ENV_TARGET_TRIPLE ?? hostTriple();
   const windows = triple.includes('windows');
   const outDir = join(dirname(fileURLToPath(import.meta.url)), '..', 'src-tauri', 'binaries');

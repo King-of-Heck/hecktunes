@@ -2,6 +2,7 @@ import { convertFileSrc, invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { getCurrentWebview } from '@tauri-apps/api/webview';
 import type {
+  AboutInfo,
   AlbumEdit,
   AlbumRow,
   JobChoice,
@@ -90,3 +91,5 @@ export const onPlayer = (cb: (s: PlayerStatus) => void): Promise<UnlistenFn> => 
 export const getSettings = () => invoke<SettingsView>('get_settings');
 export const setLibraryRoot = (path: string | null) => invoke<SettingsView>('set_library_root', { path });
 export const setAcoustidKey = (key: string | null) => invoke<SettingsView>('set_acoustid_key', { key });
+
+export const about = () => invoke<AboutInfo>('about');

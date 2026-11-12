@@ -66,6 +66,7 @@
   </button>
   <div class="spacer"></div>
   <button class:active={is('settings')} onclick={() => onSelect({ kind: 'settings' })}>Settings</button>
+  <button class:active={is('about')} onclick={() => onSelect({ kind: 'about' })}>About</button>
 </nav>
 
 <style>
