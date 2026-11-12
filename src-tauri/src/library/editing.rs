@@ -30,7 +30,9 @@ fn record_file_state(lib: &mut Library, track: &TrackRow) -> Result<()> {
 /// After a rewrite that may have stopped part-way, store each file's real size and hash.
 fn record_all(lib: &mut Library, tracks: &[TrackRow]) {
     for t in tracks {
-        let _ = record_file_state(lib, t);
+        if let Err(e) = record_file_state(lib, t) {
+            eprintln!("could not record file state for track {}: {e}", t.id);
+        }
     }
 }
 
@@ -59,7 +61,9 @@ pub fn apply_track_edit(lib: &mut Library, track_id: i64, edit: &TrackEdit) -> R
     let album = lib.album(track.album_id)?.ok_or_else(|| anyhow!("album {} not found", track.album_id))?;
     let all = lib.album_tracks(track.album_id)?;
     if let Err(e) = write_tags(&track.file_path, &tags_for(&album, &track, &all), None) {
-        let _ = record_file_state(lib, &track);
+        if let Err(re) = record_file_state(lib, &track) {
+            eprintln!("could not record file state for track {}: {re}", track.id);
+        }
         return Err(e);
     }
     record_file_state(lib, &track)
@@ -139,9 +143,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn a_failed_album_edit_still_records_the_files_real_state() {
-        use crate::library::hash::file_hash;
+    /// Imports two WAVs, stores a wrong state for the second, and makes that file read-only.
+    fn album_with_unwritable_second_track() -> (tempfile::TempDir, Library, i64, Vec<TrackRow>) {
         let dir = tempfile::tempdir().unwrap();
         let src = dir.path().join("s");
         std::fs::create_dir(&src).unwrap();
@@ -151,20 +154,48 @@ mod tests {
         let group = scan_paths(&[src]).groups.remove(0);
         let id = apply(&mut lib, &group, None, None, false).unwrap();
         let tracks = lib.album_tracks(id).unwrap();
-        // The second file can't be rewritten.
+        lib.set_track_file_state(tracks[1].id, 0, "stale").unwrap();
         let mut perms = std::fs::metadata(&tracks[1].file_path).unwrap().permissions();
         perms.set_readonly(true);
-        std::fs::set_permissions(&tracks[1].file_path, perms.clone()).unwrap();
+        std::fs::set_permissions(&tracks[1].file_path, perms).unwrap();
+        (dir, lib, id, tracks)
+    }
+
+    fn make_writable(path: &std::path::Path) {
+        let mut perms = std::fs::metadata(path).unwrap().permissions();
+        #[allow(clippy::permissions_set_readonly_false)]
+        perms.set_readonly(false);
+        std::fs::set_permissions(path, perms).unwrap();
+    }
+
+    fn assert_state_is_real(lib: &Library, track_id: i64) {
+        use crate::library::hash::file_hash;
+        let t = lib.track(track_id).unwrap().unwrap();
+        assert_eq!(t.content_hash.as_deref(), Some(file_hash(&t.file_path).unwrap().as_str()));
+        assert_eq!(t.size_bytes, std::fs::metadata(&t.file_path).unwrap().len());
+    }
+
+    #[test]
+    fn a_failed_album_edit_still_records_the_files_real_state() {
+        let (_dir, mut lib, id, tracks) = album_with_unwritable_second_track();
 
         let result = apply_album_edit(&mut lib, id, &AlbumEdit { title: "Alb".into(), album_artist: "Band".into(), year: Some("2001".into()), genre: None });
 
-        #[allow(clippy::permissions_set_readonly_false)]
-        perms.set_readonly(false);
-        std::fs::set_permissions(&tracks[1].file_path, perms).unwrap();
+        make_writable(&tracks[1].file_path);
         assert!(result.is_err());
-        for t in lib.album_tracks(id).unwrap() {
-            assert_eq!(t.content_hash.as_deref(), Some(file_hash(&t.file_path).unwrap().as_str()), "{}", t.title);
-            assert_eq!(t.size_bytes, std::fs::metadata(&t.file_path).unwrap().len());
+        for t in &tracks {
+            assert_state_is_real(&lib, t.id);
         }
+    }
+
+    #[test]
+    fn a_failed_track_edit_still_records_the_files_real_state() {
+        let (_dir, mut lib, _id, tracks) = album_with_unwritable_second_track();
+
+        let result = apply_track_edit(&mut lib, tracks[1].id, &TrackEdit { title: "New".into(), artist: "Band".into(), disc: 1, number: 2 });
+
+        make_writable(&tracks[1].file_path);
+        assert!(result.is_err());
+        assert_state_is_real(&lib, tracks[1].id);
     }
 }
