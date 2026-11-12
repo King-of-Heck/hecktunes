@@ -28,6 +28,39 @@ function licenceTexts(dir) {
     .filter(Boolean);
 }
 
+// ---- Fallback: standard licence texts for packages that ship no licence file ----
+// scripts/licence-templates/ holds verbatim copies of the standard texts, taken from crates.io sources:
+//   MIT.txt          serde 1.0.229 LICENSE-MIT
+//   Apache-2.0.txt   serde 1.0.229 LICENSE-APACHE
+//   MPL-2.0.txt      symphonia 0.6.1 LICENSE
+//   BSD-3-Clause.txt brotli 8.0.4 LICENSE.BSD-3-Clause (without its copyright lines)
+// MIT and BSD texts get a "Copyright (c) <authors>" line (or "the <name> contributors") prepended.
+const templateDir = join(root, 'scripts', 'licence-templates');
+const templateFiles = { MIT: 'MIT.txt', 'BSD-3-Clause': 'BSD-3-Clause.txt', 'Apache-2.0': 'Apache-2.0.txt', 'MPL-2.0': 'MPL-2.0.txt' };
+const needsCopyright = new Set(['MIT', 'BSD-3-Clause']);
+function template(id) {
+  return readFileSync(join(templateDir, templateFiles[id]), 'utf8').replace(/\r\n/g, '\n').trim();
+}
+/** Licence ids to include for an SPDX expression: one of "A OR B" (MIT preferred), each of "A AND B" / "A WITH B". */
+function pickLicences(expr) {
+  const alternatives = expr.replace(/[()]/g, ' ').split(/\s+OR\s+|\//).map((a) => a.trim()).filter(Boolean);
+  const usable = alternatives
+    .map((a) => a.split(/\s+(?:AND|WITH)\s+/).map((t) => t.trim()))
+    .filter((ids) => ids.every((id) => id in templateFiles));
+  if (!usable.length) return [];
+  return usable.find((ids) => ids.includes('MIT')) ?? usable[0];
+}
+/** Texts for a package with no licence file of its own. */
+function templateTexts(license, holders, name) {
+  const who = holders.length ? holders.join(', ') : `the ${name} contributors`;
+  return pickLicences(license).map((id) => {
+    const text = template(id);
+    return needsCopyright.has(id) && !/^\s*copyright/im.test(text) ? `Copyright (c) ${who}\n\n${text}` : text;
+  });
+}
+const stripEmail = (a) => a.replace(/\s*<[^>]*>/g, '').replace(/\s*\([^)]*\)/g, '').trim();
+const withFallback = (texts, license, holders, name) => (texts.length ? texts : templateTexts(license, holders, name));
+
 // ---- Rust: walk normal dependencies from the app crate ----
 const meta = JSON.parse(
   execFileSync('cargo', ['metadata', '--format-version', '1', '--manifest-path', join(root, 'src-tauri', 'Cargo.toml'), '--filter-platform', target], {
@@ -56,7 +89,7 @@ const crates = [...seen]
     version: p.version,
     license: p.license ?? (p.license_file ? `see ${p.license_file}` : 'unknown'),
     source: p.repository ?? p.homepage ?? `https://crates.io/crates/${p.name}`,
-    texts: licenceTexts(dirname(p.manifest_path)),
+    texts: withFallback(licenceTexts(dirname(p.manifest_path)), p.license ?? '', (p.authors ?? []).map(stripEmail).filter(Boolean), p.name),
   }))
   .sort((a, b) => a.name.localeCompare(b.name) || a.version.localeCompare(b.version));
 
@@ -72,12 +105,14 @@ while (npmQueue.length) {
   if (!existsSync(pj)) continue;
   const p = JSON.parse(readFileSync(pj, 'utf8'));
   const repo = typeof p.repository === 'string' ? p.repository : p.repository?.url;
+  const license = typeof p.license === 'string' ? p.license : p.license?.type ?? 'unknown';
+  const people = [p.author, ...(p.contributors ?? [])].filter(Boolean).map((a) => stripEmail(typeof a === 'string' ? a : a.name ?? ''));
   npmSeen.set(name, {
     name,
     version: p.version,
-    license: typeof p.license === 'string' ? p.license : p.license?.type ?? 'unknown',
+    license,
     source: repo ?? p.homepage ?? `https://www.npmjs.com/package/${name}`,
-    texts: licenceTexts(dir),
+    texts: withFallback(licenceTexts(dir), license, people.filter(Boolean), name),
   });
   npmQueue.push(...Object.keys(p.dependencies ?? {}));
 }
@@ -85,6 +120,12 @@ const npm = [...npmSeen.values()].sort((a, b) => a.name.localeCompare(b.name));
 
 // ---- write ----
 const all = [...crates.map((c) => ({ ...c, kind: 'crate' })), ...npm.map((n) => ({ ...n, kind: 'npm' }))];
+const missing = all.filter((c) => c.texts.length === 0);
+if (missing.length) {
+  console.error(`error: ${missing.length} of ${all.length} shipped packages have no licence text:`);
+  for (const c of missing) console.error(`  ${c.kind} ${c.name} ${c.version} (${c.license})`);
+  process.exit(1);
+}
 const byText = new Map();
 for (const c of all) {
   for (const t of c.texts) {
