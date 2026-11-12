@@ -26,6 +26,7 @@
         have to rescan the card. echo-sync is free software under the GNU General Public License v3.
         <button class="link" onclick={() => open(info!.echo_sync_source)}>Its source code</button>
       </p>
+      <p class="meta">Each HeckTunes release page also carries a copy of echo-sync's source code.</p>
       {#if info.echo_sync_license}
         <details><summary>echo-sync licence (GPLv3)</summary><pre>{info.echo_sync_license}</pre></details>
       {:else}

@@ -39,6 +39,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
+          key: ${{ matrix.target }}
       - run: npm ci
       - name: Fetch echo-sync for the target (binary + licence, checksum-verified)
         run: node scripts/fetch-echo-sync.mjs --target ${{ matrix.target }}
@@ -54,3 +55,16 @@ jobs:
           releaseDraft: true
           prerelease: false
           args: --target ${{ matrix.target }} --bundles ${{ matrix.bundles }}
+
+  # echo-sync is GPLv3 and ships inside the installers, so its source goes on the same release page.
+  echo-sync-source:
+    needs: build
+    runs-on: ubuntu-latest
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      TAG: ${{ github.ref_name }}
+    steps:
+      - name: Attach echo-sync's source to the draft release
+        run: |
+          curl -fsSL --retry 3 -o echopod-v0.11.1-source.tar.gz https://github.com/BasilSkyWalk/echopod/archive/refs/tags/v0.11.1.tar.gz
+          gh release upload "$TAG" echopod-v0.11.1-source.tar.gz --clobber --repo "$GITHUB_REPOSITORY"
