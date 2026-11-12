@@ -5,6 +5,7 @@ use serde::Serialize;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, RecvTimeoutError, Sender};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 /// How often position updates are sent while playing.
@@ -101,11 +102,20 @@ enum Cmd {
     Pause,
     Resume,
     Seek(u64),
-    Stop,
+    /// `reply` hears back once the stop has been handled.
+    Stop { reply: Option<Sender<()>> },
 }
 
 pub struct PlayerService {
     tx: Sender<Cmd>,
+    /// The track whose file the player holds (any state but idle). Its own small lock, never the
+    /// Library's, so commands can check it without blocking on the player.
+    current: Arc<Mutex<Option<i64>>>,
+}
+
+/// The track a status says the player holds.
+fn held_track(status: &PlayerStatus) -> Option<i64> {
+    if status.state == PlayState::Idle { None } else { status.track_id }
 }
 
 impl PlayerService {
@@ -114,6 +124,9 @@ impl PlayerService {
         notify: impl Fn(PlayerStatus) + Send + 'static,
     ) -> Self {
         let (tx, rx) = channel::<Cmd>();
+        let current = Arc::new(Mutex::new(None));
+        let held = current.clone();
+        let set_held = move |s: &PlayerStatus| *held.lock().unwrap_or_else(|p| p.into_inner()) = held_track(s);
         std::thread::Builder::new()
             .name("hecktunes-player".into())
             .spawn(move || {
@@ -121,15 +134,23 @@ impl PlayerService {
                 let mut status = PlayerStatus::idle();
                 loop {
                     match rx.recv_timeout(TICK) {
-                        Ok(cmd) => {
+                        Ok(mut cmd) => {
                             let track_id = match &cmd {
                                 Cmd::Play { track_id, .. } => Some(*track_id),
                                 _ => status.track_id,
+                            };
+                            let reply = match &mut cmd {
+                                Cmd::Stop { reply } => reply.take(),
+                                _ => None,
                             };
                             let done = catch_unwind(AssertUnwindSafe(|| handle(cmd, &open, &mut audio, &mut status)));
                             if done.is_err() {
                                 audio = None;
                                 status = panic_status(track_id);
+                            }
+                            set_held(&status);
+                            if let Some(reply) = reply {
+                                let _ = reply.send(());
                             }
                             notify(status.clone());
                         }
@@ -153,6 +174,7 @@ impl PlayerService {
                                 Err(_) => {
                                     audio = None;
                                     status = panic_status(status.track_id);
+                                    set_held(&status);
                                     notify(status.clone());
                                 }
                             }
@@ -162,7 +184,22 @@ impl PlayerService {
                 }
             })
             .expect("couldn't start the player thread");
-        Self { tx }
+        Self { tx, current }
+    }
+
+    /// The track whose file the player holds right now, if any.
+    pub fn current_track(&self) -> Option<i64> {
+        *self.current.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    /// Stops playback and waits (up to `timeout`) until the player has let go of the file.
+    /// Returns false if the player didn't answer in time.
+    pub fn stop_and_wait(&self, timeout: Duration) -> bool {
+        let (reply, done) = channel();
+        if self.tx.send(Cmd::Stop { reply: Some(reply) }).is_err() {
+            return true; // no player thread, so nothing holds a file
+        }
+        done.recv_timeout(timeout).is_ok()
     }
 
     pub fn play(&self, track_id: i64, path: PathBuf, duration_ms: u64) {
@@ -178,7 +215,7 @@ impl PlayerService {
         let _ = self.tx.send(Cmd::Seek(ms));
     }
     pub fn stop(&self) {
-        let _ = self.tx.send(Cmd::Stop);
+        let _ = self.tx.send(Cmd::Stop { reply: None });
     }
 }
 
@@ -261,7 +298,7 @@ fn handle(
                 }
             }
         }
-        Cmd::Stop => {
+        Cmd::Stop { .. } => {
             if let Some(a) = audio.as_mut() {
                 a.stop();
             }
@@ -288,6 +325,8 @@ mod tests {
         stopped_since_load: bool,
         /// pause/resume/seek calls received.
         control_calls: u32,
+        /// How long `stop` takes (a slow or wedged device).
+        stop_delay_ms: u64,
     }
 
     struct FakeAudio(Arc<Mutex<Shared>>);
@@ -325,6 +364,8 @@ mod tests {
             Ok(())
         }
         fn stop(&mut self) {
+            let delay = self.0.lock().unwrap().stop_delay_ms;
+            std::thread::sleep(std::time::Duration::from_millis(delay));
             let mut s = self.0.lock().unwrap();
             s.position = 0;
             s.finished = false;
@@ -489,6 +530,44 @@ mod tests {
         shared.lock().unwrap().fail_load = false;
         svc.play(2, PathBuf::from("b.flac"), 1000);
         wait_for(&rx, |s| s.state == PlayState::Playing && s.track_id == Some(2));
+    }
+
+    #[test]
+    fn current_track_follows_what_the_player_holds() {
+        let shared = Arc::new(Mutex::new(Shared::default()));
+        let (svc, rx) = service(shared.clone(), Arc::new(Mutex::new(false)));
+        assert_eq!(svc.current_track(), None);
+        svc.play(7, PathBuf::from("a.flac"), 0);
+        wait_for(&rx, |s| s.state == PlayState::Playing);
+        assert_eq!(svc.current_track(), Some(7));
+        svc.pause();
+        wait_for(&rx, |s| s.state == PlayState::Paused);
+        assert_eq!(svc.current_track(), Some(7));
+        svc.stop();
+        wait_for(&rx, |s| s.state == PlayState::Idle);
+        assert_eq!(svc.current_track(), None);
+    }
+
+    #[test]
+    fn stop_and_wait_returns_once_the_player_has_let_go_of_the_file() {
+        let shared = Arc::new(Mutex::new(Shared { stop_delay_ms: 200, ..Default::default() }));
+        let (svc, rx) = service(shared.clone(), Arc::new(Mutex::new(false)));
+        svc.play(7, PathBuf::from("a.flac"), 0);
+        wait_for(&rx, |s| s.state == PlayState::Playing);
+        assert!(svc.stop_and_wait(std::time::Duration::from_secs(5)));
+        assert!(shared.lock().unwrap().stopped_since_load, "the device was stopped before stop_and_wait returned");
+        assert_eq!(svc.current_track(), None);
+    }
+
+    #[test]
+    fn stop_and_wait_gives_up_after_the_timeout() {
+        let shared = Arc::new(Mutex::new(Shared { stop_delay_ms: 1_000, ..Default::default() }));
+        let (svc, rx) = service(shared.clone(), Arc::new(Mutex::new(false)));
+        svc.play(7, PathBuf::from("a.flac"), 0);
+        wait_for(&rx, |s| s.state == PlayState::Playing);
+        let t = std::time::Instant::now();
+        assert!(!svc.stop_and_wait(std::time::Duration::from_millis(50)));
+        assert!(t.elapsed() < std::time::Duration::from_millis(900));
     }
 
     #[test]

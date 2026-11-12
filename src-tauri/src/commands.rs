@@ -124,6 +124,24 @@ fn library_change_ready(state: &AppState) -> Result<(), String> {
     library_change_allowed(state.sync.is_running())
 }
 
+/// How long to wait for the player to let go of a file before refusing a library change.
+const PLAYER_STOP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// Stops playback first when the player holds a file of `album_id`, so the album's files can be
+/// rewritten or removed. The Library lock is held only to look the track up, never while waiting.
+fn release_album_files(player: &crate::player::PlayerService, lib: &Mutex<Library>, album_id: i64) -> Result<(), String> {
+    let Some(track_id) = player.current_track() else { return Ok(()) };
+    let playing_album = lib.lock().unwrap().track(track_id).map_err(err)?.map(|t| t.album_id);
+    if playing_album != Some(album_id) {
+        return Ok(());
+    }
+    if player.stop_and_wait(PLAYER_STOP_TIMEOUT) {
+        Ok(())
+    } else {
+        Err("The player is still holding a file from this album. Try again in a moment.".into())
+    }
+}
+
 /// Skip and Search don't touch library files; every other choice does.
 fn choice_changes_library(choice: &JobChoice) -> bool {
     !matches!(choice, JobChoice::Skip | JobChoice::Search { .. })
@@ -141,18 +159,24 @@ pub fn resolve_job(state: State<AppState>, job_id: u64, choice: JobChoice) -> Cm
 #[tauri::command(async)]
 pub fn retry_metadata(state: State<AppState>, album_id: i64) -> CmdResult<u64> {
     library_change_ready(&state)?;
+    release_album_files(&state.player, &state.lib, album_id)?;
     Ok(state.queue.reimport(album_id))
 }
 
 #[tauri::command(async)]
 pub fn update_album(state: State<AppState>, album_id: i64, edit: AlbumEdit) -> CmdResult<()> {
     library_change_ready(&state)?;
+    release_album_files(&state.player, &state.lib, album_id)?;
     editing::apply_album_edit(&mut state.lib.lock().unwrap(), album_id, &edit).map_err(err)
 }
 
 #[tauri::command(async)]
 pub fn update_track(state: State<AppState>, track_id: i64, edit: TrackEdit) -> CmdResult<()> {
     library_change_ready(&state)?;
+    let album_id = state.lib.lock().unwrap().track(track_id).map_err(err)?.map(|t| t.album_id);
+    if let Some(album_id) = album_id {
+        release_album_files(&state.player, &state.lib, album_id)?;
+    }
     editing::apply_track_edit(&mut state.lib.lock().unwrap(), track_id, &edit).map_err(err)
 }
 
@@ -165,6 +189,7 @@ pub fn list_songs(state: State<AppState>) -> CmdResult<Vec<SongRow>> {
 #[tauri::command(async)]
 pub fn delete_album(state: State<AppState>, album_id: i64) -> CmdResult<()> {
     library_change_ready(&state)?;
+    release_album_files(&state.player, &state.lib, album_id)?;
     state.lib.lock().unwrap().delete_album(album_id, true).map_err(err)
 }
 
@@ -306,5 +331,74 @@ mod guard_tests {
         assert!(choice_changes_library(&JobChoice::Pick { mbid: "m".into() }));
         assert!(choice_changes_library(&JobChoice::KeepExisting));
         assert!(choice_changes_library(&JobChoice::Replace));
+    }
+}
+
+#[cfg(test)]
+mod player_release_tests {
+    use super::*;
+    use crate::player::{Audio, PlayerService};
+    use crate::test_support::add_memory_album;
+    use std::path::Path;
+    use std::time::{Duration, Instant};
+
+    struct SilentAudio(Arc<Mutex<bool>>);
+
+    impl Audio for SilentAudio {
+        fn load(&mut self, _path: &Path) -> anyhow::Result<Option<u64>> {
+            *self.0.lock().unwrap() = true;
+            Ok(Some(1_000))
+        }
+        fn pause(&mut self) {}
+        fn resume(&mut self) {}
+        fn seek(&mut self, _ms: u64) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn stop(&mut self) {
+            *self.0.lock().unwrap() = false;
+        }
+        fn position_ms(&self) -> u64 {
+            0
+        }
+        fn finished(&self) -> bool {
+            false
+        }
+    }
+
+    fn playing(track_id: i64) -> (PlayerService, Arc<Mutex<bool>>) {
+        let open = Arc::new(Mutex::new(false));
+        let o = open.clone();
+        let player = PlayerService::start(move || Ok(Box::new(SilentAudio(o.clone())) as Box<dyn Audio>), |_| {});
+        player.play(track_id, PathBuf::from("x.flac"), 1_000);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while player.current_track() != Some(track_id) {
+            assert!(Instant::now() < deadline, "player never started");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        (player, open)
+    }
+
+    #[test]
+    fn playback_of_the_affected_album_is_stopped_first() {
+        let mut lib = Library::open_in_memory(PathBuf::from("/lib")).unwrap();
+        let (a, a_tracks) = add_memory_album(&mut lib, "A", "X", 2);
+        let (b, _) = add_memory_album(&mut lib, "B", "X", 1);
+        let lib = Mutex::new(lib);
+        let (player, open) = playing(a_tracks[1]);
+
+        release_album_files(&player, &lib, b).unwrap();
+        assert_eq!(player.current_track(), Some(a_tracks[1]), "another album's playback is left alone");
+        assert!(*open.lock().unwrap());
+
+        release_album_files(&player, &lib, a).unwrap();
+        assert_eq!(player.current_track(), None);
+        assert!(!*open.lock().unwrap(), "the file was let go before returning");
+    }
+
+    #[test]
+    fn nothing_playing_needs_nothing() {
+        let lib = Mutex::new(Library::open_in_memory(PathBuf::from("/lib")).unwrap());
+        let player = PlayerService::start(|| anyhow::bail!("no device"), |_| {});
+        release_album_files(&player, &lib, 1).unwrap();
     }
 }
