@@ -67,7 +67,7 @@
         <p class="meta">After a restart: {s.saved_library_root}</p>
       {/if}
       <div class="row">
-        <button onclick={() => revealItemInDir(s!.library_root).catch(fail)}>Show in folder</button>
+        <button onclick={() => revealItemInDir(s!.library_root).catch(fail)} disabled={!!s.library_unavailable}>Show in folder</button>
         <button onclick={changeFolder} disabled={s.album_count > 0}>Change…</button>
         {#if s.saved_library_root}
           <button onclick={() => run(() => api.setLibraryRoot(null), 'Back to the default folder.')} disabled={s.album_count > 0}>Use default</button>

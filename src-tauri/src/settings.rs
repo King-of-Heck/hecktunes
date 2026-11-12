@@ -90,8 +90,8 @@ pub struct RootChoice {
 }
 
 /// Picks the library folder at startup: settings.json's (if it names an absolute path, even when
-/// that folder is missing right now), else the one recorded in the library database if it still
-/// exists (covers a damaged or lost settings.json), else the default.
+/// that folder is missing right now), else the one recorded in the library database, likewise even
+/// when missing (covers a damaged or lost settings.json), else the default.
 pub fn choose_library_root(
     settings_root: Option<&Path>,
     recorded: Option<&Path>,
@@ -101,15 +101,21 @@ pub fn choose_library_root(
     if let Some(r) = settings_root.filter(|r| r.is_absolute() || r.has_root()) {
         return RootChoice { root: r.to_path_buf(), available: is_dir(r), custom: Some(r.to_path_buf()) };
     }
-    if let Some(r) = recorded.filter(|r| is_dir(r)) {
+    if let Some(r) = recorded.filter(|r| r.is_absolute() || r.has_root()) {
         let custom = (r != default_root).then(|| r.to_path_buf());
-        return RootChoice { root: r.to_path_buf(), available: true, custom };
+        return RootChoice { root: r.to_path_buf(), available: is_dir(r), custom };
     }
     RootChoice { root: default_root.to_path_buf(), available: true, custom: None }
 }
 
+/// Whether startup should write the chosen folder into the library database: only when it is
+/// available, so a recorded folder on a disconnected drive is never replaced.
+pub fn should_record_root(choice: &RootChoice) -> bool {
+    choice.available
+}
+
 pub fn unavailable_message(root: &Path) -> String {
-    format!("Your library folder {} isn't available (is the drive connected?)", root.display())
+    format!("Your library folder {} isn't available (is the drive connected?) Connect it and restart HeckTunes.", root.display())
 }
 
 /// Blank clears the override (the built-in key, if any, is used again).
@@ -309,11 +315,22 @@ mod root_tests {
         let c = choose_library_root(None, Some(Path::new("F:/Old")), d, exists_only(&["F:/Old"]));
         assert_eq!(c, RootChoice { root: "F:/Old".into(), available: true, custom: Some("F:/Old".into()) });
         let c = choose_library_root(None, Some(Path::new("F:/Old")), d, exists_only(&[]));
-        assert_eq!(c, RootChoice { root: d.into(), available: true, custom: None });
+        assert_eq!(c, RootChoice { root: "F:/Old".into(), available: false, custom: Some("F:/Old".into()) });
         let c = choose_library_root(None, Some(d), d, exists_only(&["C:/Music/HeckTunes"]));
         assert_eq!(c, RootChoice { root: d.into(), available: true, custom: None });
         let c = choose_library_root(None, None, d, exists_only(&[]));
         assert_eq!(c, RootChoice { root: d.into(), available: true, custom: None });
+    }
+
+    #[test]
+    fn an_unavailable_root_is_never_recorded_over_the_database_one() {
+        let d = Path::new("C:/Music/HeckTunes");
+        let gone = choose_library_root(None, Some(Path::new("F:/Old")), d, exists_only(&[]));
+        assert!(!should_record_root(&gone));
+        let here = choose_library_root(None, Some(Path::new("F:/Old")), d, exists_only(&["F:/Old"]));
+        assert!(should_record_root(&here));
+        let fresh = choose_library_root(None, None, d, exists_only(&[]));
+        assert!(should_record_root(&fresh));
     }
 
     #[test]
@@ -336,10 +353,10 @@ mod root_tests {
     fn unavailable_folder_message_names_the_folder() {
         assert_eq!(
             unavailable_message(Path::new("E:/Tunes")),
-            "Your library folder E:/Tunes isn't available (is the drive connected?)"
+            "Your library folder E:/Tunes isn't available (is the drive connected?) Connect it and restart HeckTunes."
         );
         let v = view(&Settings::default(), &Settings::default(), Path::new("E:/Tunes"), Path::new("C:/M"), false, None, 0, false);
-        assert_eq!(v.library_unavailable.as_deref(), Some("Your library folder E:/Tunes isn't available (is the drive connected?)"));
+        assert_eq!(v.library_unavailable.as_deref(), Some("Your library folder E:/Tunes isn't available (is the drive connected?) Connect it and restart HeckTunes."));
         let v = view(&Settings::default(), &Settings::default(), Path::new("E:/Tunes"), Path::new("C:/M"), false, None, 0, true);
         assert!(v.library_unavailable.is_none());
     }

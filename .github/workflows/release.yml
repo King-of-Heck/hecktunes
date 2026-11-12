@@ -59,6 +59,8 @@ jobs:
   # echo-sync is GPLv3 and ships inside the installers, so its source goes on the same release page.
   echo-sync-source:
     needs: build
+    # Runs even if one matrix leg failed; the upload still fails loudly if no draft release exists.
+    if: always() && !cancelled()
     runs-on: ubuntu-latest
     env:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

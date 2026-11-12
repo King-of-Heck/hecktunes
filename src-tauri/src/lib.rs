@@ -58,8 +58,11 @@ pub fn run() {
             let startup = settings.clone();
             let in_effect = settings::Settings { library_root: choice.custom.clone(), ..settings.clone() };
             let active_root = root.clone();
+            let record = settings::should_record_root(&choice);
             let library = Library::open(&db_path, root)?;
-            library.record_root(&active_root)?;
+            if record {
+                library.record_root(&active_root)?;
+            }
             let lib = Arc::new(Mutex::new(library));
             // Settings file, then runtime env var, then the key baked in at build time.
             let key = settings::resolve_acoustid_key(

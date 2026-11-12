@@ -320,7 +320,7 @@ mod guard_tests {
         assert!(library_usable(true, std::path::Path::new("E:/Tunes")).is_ok());
         assert_eq!(
             library_usable(false, std::path::Path::new("E:/Tunes")).unwrap_err(),
-            "Your library folder E:/Tunes isn't available (is the drive connected?)"
+            "Your library folder E:/Tunes isn't available (is the drive connected?) Connect it and restart HeckTunes."
         );
     }
 

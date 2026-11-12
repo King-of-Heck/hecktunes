@@ -43,6 +43,9 @@ function template(id) {
 }
 /** Licence ids to include for an SPDX expression: one of "A OR B" (MIT preferred), each of "A AND B" / "A WITH B". */
 function pickLicences(expr) {
+  // Parenthesised or mixed AND/OR expressions can't be split safely: return nothing so the
+  // missing-text check fails loudly instead of attaching the wrong licence.
+  if (/[()]/.test(expr) || (/\bAND\b/.test(expr) && /\bOR\b/.test(expr))) return [];
   const alternatives = expr.replace(/[()]/g, ' ').split(/\s+OR\s+|\//).map((a) => a.trim()).filter(Boolean);
   const usable = alternatives
     .map((a) => a.split(/\s+(?:AND|WITH)\s+/).map((t) => t.trim()))
