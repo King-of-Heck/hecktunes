@@ -49,8 +49,7 @@
         value={position}
         disabled={duration === 0}
         oninput={(e) => (dragging = Number(e.currentTarget.value))}
-        onchange={(e) => seek(Number(e.currentTarget.value))}
-        onpointerup={() => (dragging = null)}
+        onchange={(e) => seek(dragging ?? Number(e.currentTarget.value))}
         onblur={() => (dragging = null)}
         aria-label="Position"
       />
