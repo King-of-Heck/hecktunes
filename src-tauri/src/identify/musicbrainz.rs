@@ -101,6 +101,14 @@ pub fn parse_release_group_id(v: &Value) -> Option<String> {
     v["release-group"]["id"].as_str().map(str::to_string)
 }
 
+/// The side letter of a vinyl track number like "A3" or "B" (None for "3").
+fn side_letter(number: Option<&str>) -> Option<String> {
+    let n = number?.trim();
+    let letters: String = n.chars().take_while(|c| c.is_ascii_alphabetic()).collect();
+    let rest = &n[letters.len()..];
+    (!letters.is_empty() && rest.chars().all(|c| c.is_ascii_digit())).then(|| letters.to_ascii_uppercase())
+}
+
 pub fn parse_release(v: &Value) -> Result<ReleaseCandidate> {
     let mbid = str_field(v, "id").ok_or_else(|| anyhow!("release without id"))?;
     let artist = join_credit(&v["artist-credit"]);
@@ -117,6 +125,7 @@ pub fn parse_release(v: &Value) -> Result<ReleaseCandidate> {
                 artist: if credit.is_empty() { artist.clone() } else { credit },
                 length_ms: t["length"].as_u64().or_else(|| t["recording"]["length"].as_u64()),
                 recording_id: t["recording"]["id"].as_str().unwrap_or("").to_string(),
+                side: side_letter(t["number"].as_str()),
             });
         }
     }
@@ -201,6 +210,15 @@ impl MusicBrainz {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn vinyl_side_letters_come_from_the_track_number() {
+        assert_eq!(side_letter(Some("A3")), Some("A".into()));
+        assert_eq!(side_letter(Some("b")), Some("B".into()));
+        assert_eq!(side_letter(Some("3")), None);
+        assert_eq!(side_letter(Some("A3a")), None);
+        assert_eq!(side_letter(None), None);
+    }
 
     #[test]
     fn reads_the_release_group_id() {

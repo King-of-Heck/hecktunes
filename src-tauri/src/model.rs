@@ -41,6 +41,9 @@ pub struct CandidateTrack {
     pub artist: String,
     pub length_ms: Option<u64>,
     pub recording_id: String,
+    /// Vinyl side letter from MusicBrainz's track number ("A" for "A3"); None for CDs and digital.
+    #[serde(default)]
+    pub side: Option<String>,
 }
 
 /// A MusicBrainz release with its full track list.

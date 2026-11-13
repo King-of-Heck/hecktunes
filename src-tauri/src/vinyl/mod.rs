@@ -2,3 +2,4 @@
 pub mod wav;
 pub mod envelope;
 pub mod gaps;
+pub mod align;

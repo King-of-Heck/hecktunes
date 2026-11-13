@@ -90,6 +90,7 @@ pub fn candidate(mbid: &str, title: &str, artist: &str, tracks: &[(&str, u64)]) 
                 artist: artist.into(),
                 length_ms: Some(*ms),
                 recording_id: format!("rec-{mbid}-{i}"),
+                side: None,
             })
             .collect(),
     }
