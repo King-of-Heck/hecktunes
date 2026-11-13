@@ -19,6 +19,8 @@ pub struct AppState {
     /// False when the library folder was missing at startup (e.g. its drive isn't connected):
     /// commands that change the library or read its files for a sync refuse until a restart.
     pub library_available: bool,
+    /// Temporary FLACs of vinyl imports and the Listen clip.
+    pub vinyl_tmp: PathBuf,
 }
 
 pub struct SettingsState {
@@ -96,6 +98,33 @@ pub fn import_paths(state: State<AppState>, paths: Vec<String>) -> CmdResult<()>
     Ok(())
 }
 
+#[tauri::command(async)]
+pub fn import_vinyl(state: State<AppState>, paths: Vec<String>) -> CmdResult<()> {
+    library_ready(&state)?;
+    state.queue.send(Command::ImportVinyl(paths.into_iter().map(PathBuf::from).collect()));
+    Ok(())
+}
+
+/// Half the length of the Listen clip around a cut.
+const PREVIEW_HALF_MS: u64 = 3000;
+
+/// Plays the 6 s around `at_ms` of a vinyl recording, so a cut can be checked by ear.
+#[tauri::command(async)]
+pub fn vinyl_preview(state: State<AppState>, path: String, at_ms: u64) -> CmdResult<()> {
+    // The player may be holding the previous clip open; it must let go before it is rewritten.
+    if !state.player.stop_and_wait(PLAYER_STOP_TIMEOUT) {
+        return Err("The player is busy. Try again in a moment.".into());
+    }
+    let info = crate::vinyl::wav::probe(std::path::Path::new(&path)).map_err(|e| format!("{e:#}"))?;
+    let from = at_ms.saturating_sub(PREVIEW_HALF_MS);
+    let to = (at_ms + PREVIEW_HALF_MS).min(info.duration_ms());
+    std::fs::create_dir_all(&state.vinyl_tmp).map_err(err)?;
+    let clip = state.vinyl_tmp.join("preview.flac");
+    crate::vinyl::encode::encode_range(&info, info.ms_to_frame(from), info.ms_to_frame(to), &clip).map_err(|e| format!("{e:#}"))?;
+    state.player.play(crate::player::PREVIEW_TRACK_ID, clip, to.saturating_sub(from));
+    Ok(())
+}
+
 /// Library files must not be rewritten or deleted while an Echo Mini sync reads them.
 fn library_change_allowed(syncing: bool) -> Result<(), String> {
     if syncing {
@@ -142,9 +171,9 @@ fn release_album_files(player: &crate::player::PlayerService, lib: &Mutex<Librar
     }
 }
 
-/// Skip and Search don't touch library files; every other choice does.
+/// Skip, Search and choosing another release for a vinyl review don't touch library files.
 fn choice_changes_library(choice: &JobChoice) -> bool {
-    !matches!(choice, JobChoice::Skip | JobChoice::Search { .. })
+    !matches!(choice, JobChoice::Skip | JobChoice::Search { .. } | JobChoice::VinylRealign { .. })
 }
 
 #[tauri::command(async)]
@@ -346,6 +375,8 @@ mod guard_tests {
         assert!(choice_changes_library(&JobChoice::Pick { mbid: "m".into() }));
         assert!(choice_changes_library(&JobChoice::KeepExisting));
         assert!(choice_changes_library(&JobChoice::Replace));
+        assert!(!choice_changes_library(&JobChoice::VinylRealign { mbid: "m".into() }));
+        assert!(choice_changes_library(&JobChoice::VinylConfirm { tracks: vec![], matched: false }));
     }
 }
 

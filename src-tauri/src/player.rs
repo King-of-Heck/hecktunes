@@ -11,6 +11,9 @@ use std::time::Duration;
 /// How often position updates are sent while playing.
 pub const TICK: Duration = Duration::from_millis(250);
 
+/// Track id the player reports while it plays a vinyl preview clip (not a library track).
+pub const PREVIEW_TRACK_ID: i64 = -1;
+
 /// The audio device as the player thread sees it. Implemented by `RodioAudio` and by a test fake.
 pub trait Audio {
     /// Replaces whatever is playing with `path` and starts it. Returns the duration if the decoder knows it.

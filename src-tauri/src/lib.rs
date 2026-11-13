@@ -73,8 +73,11 @@ pub fn run() {
             );
             let key_active = key.is_some();
             let source: Arc<dyn MetadataSource> = Arc::new(OnlineSource::new(key));
+            let vinyl_tmp = data_dir.join("vinyl-tmp");
+            // FLACs left behind by a vinyl import the app was closed during.
+            let _ = std::fs::remove_dir_all(&vinyl_tmp);
             let handle = app.handle().clone();
-            let queue = ImportQueue::start(lib.clone(), source, move |update| {
+            let queue = ImportQueue::start_with_tmp(lib.clone(), source, vinyl_tmp.clone(), move |update| {
                 let _ = handle.emit("import-job", update);
             });
             let sync = SyncService::new(lib.clone(), device::echosync::sidecar_path());
@@ -86,13 +89,15 @@ pub fn run() {
                 },
             );
             let settings = commands::SettingsState { config_dir, default_root, active_root, startup, in_effect, key_active };
-            app.manage(AppState { lib, queue, sync, player, settings, library_available: choice.available });
+            app.manage(AppState { lib, queue, sync, player, settings, library_available: choice.available, vinyl_tmp });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             commands::list_albums,
             commands::album_tracks,
             commands::import_paths,
+            commands::import_vinyl,
+            commands::vinyl_preview,
             commands::resolve_job,
             commands::retry_metadata,
             commands::update_album,
