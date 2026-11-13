@@ -281,3 +281,41 @@ pub fn db_frames(parts: &[(f32, f32)]) -> Vec<f32> {
     }
     out
 }
+
+/// A music database for vinyl tests: every fingerprint finds `fingerprint_ids`; `offline` makes
+/// every lookup fail like a dropped connection.
+pub struct VinylFake {
+    pub releases: Vec<ReleaseCandidate>,
+    pub fingerprint_ids: Vec<String>,
+    pub offline: bool,
+}
+
+impl VinylFake {
+    fn down<T>(&self) -> anyhow::Result<T> {
+        Err(anyhow::Error::from(ureq::Error::HostNotFound).context("network down"))
+    }
+}
+
+impl MetadataSource for VinylFake {
+    fn search(&self, _a: &str, _b: &str, _n: usize) -> anyhow::Result<Vec<String>> {
+        Ok(vec![])
+    }
+    fn search_text(&self, _q: &str) -> anyhow::Result<Vec<String>> {
+        if self.offline { return self.down(); }
+        Ok(self.releases.iter().map(|r| r.mbid.clone()).collect())
+    }
+    fn by_fingerprint(&self, _t: &SourceTrack) -> anyhow::Result<Vec<String>> {
+        Ok(vec![])
+    }
+    fn by_fingerprint_code(&self, _fp: &str, _secs: u32) -> anyhow::Result<Vec<String>> {
+        if self.offline { return self.down(); }
+        Ok(self.fingerprint_ids.clone())
+    }
+    fn release(&self, mbid: &str) -> anyhow::Result<ReleaseCandidate> {
+        if self.offline { return self.down(); }
+        self.releases.iter().find(|r| r.mbid == mbid).cloned().ok_or_else(|| anyhow::anyhow!("no release {mbid}"))
+    }
+    fn cover(&self, _mbid: &str) -> anyhow::Result<Option<Vec<u8>>> {
+        Ok(Some(png_bytes(800, 800)))
+    }
+}
