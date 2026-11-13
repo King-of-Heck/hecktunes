@@ -277,10 +277,13 @@
     <ReleasePicker job={waiting} {syncing} />
   {/key}
 {/if}
-{#if reviewing && !waiting}
-  {#key reviewing.job_id}
-    <VinylReview job={reviewing} {syncing} />
-  {/key}
+{#if reviewing}
+  <!-- Hidden, not unmounted, while another import needs a choice, so the user's edits survive. -->
+  <div hidden={waiting !== null}>
+    {#key reviewing.job_id}
+      <VinylReview job={reviewing} {syncing} />
+    {/key}
+  </div>
 {/if}
 {#if editing && selected}
   <TagEditor album={selected} tracks={editing} {syncing} onClose={(changed) => { editing = null; if (changed) refresh().catch(logError('refresh failed')); }} />
