@@ -1,7 +1,7 @@
 //! Finding the album: fingerprint the longest pieces and rank the releases they point to.
 
 use super::envelope::frame_to_ms;
-use super::{release_ms, wav, Recording, FIT_TOLERANCE};
+use super::{fits, release_ms, wav, Recording};
 use crate::identify::fingerprint::{fingerprint_pcm, MAX_SECONDS};
 use crate::identify::net::is_network_failure;
 use crate::identify::{MetadataSource, MAX_CANDIDATES};
@@ -83,10 +83,11 @@ pub fn rank(found: Vec<(ReleaseCandidate, usize)>, music_ms: impl Fn(&ReleaseCan
         .into_iter()
         .map(|(r, agree)| {
             let music_ms = music_ms(&r);
-            let diff = release_ms(&r).map(|t| t.abs_diff(music_ms));
-            let fits = diff.is_some_and(|d| d as f64 <= FIT_TOLERANCE * music_ms as f64);
+            let total = release_ms(&r);
+            let diff = total.map(|t| t.abs_diff(music_ms));
+            let fit = total.is_some_and(|t| fits(t, music_ms));
             let vinyl = r.format.as_deref().is_some_and(|f| f.to_lowercase().contains("vinyl"));
-            ((Reverse(fits), Reverse(vinyl), Reverse(agree), diff.unwrap_or(u64::MAX)), r)
+            ((Reverse(fit), Reverse(vinyl), Reverse(agree), diff.unwrap_or(u64::MAX)), r)
         })
         .collect();
     keyed.sort_by(|a, b| a.0.cmp(&b.0));

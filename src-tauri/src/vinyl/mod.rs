@@ -154,10 +154,14 @@ fn mmss(ms: u64) -> String {
     format!("{}:{:02}", s / 60, s % 60)
 }
 
+/// A release fits when its length is within FIT_TOLERANCE of the recording's music length.
+pub fn fits(release_ms: u64, music_ms: u64) -> bool {
+    release_ms.abs_diff(music_ms) as f64 <= FIT_TOLERANCE * music_ms as f64
+}
+
 fn fit_warning(music_ms: u64, r: &ReleaseCandidate) -> Option<String> {
     let total = release_ms(r)?;
-    let off = total.abs_diff(music_ms) as f64 / total.max(1) as f64;
-    (off > FIT_TOLERANCE).then(|| {
+    (!fits(total, music_ms)).then(|| {
         format!("This recording has {} of music but the release runs {}. It may be a different edition.", mmss(music_ms), mmss(total))
     })
 }
@@ -403,6 +407,15 @@ mod tests {
         let r = candidate("m1", "Album", "Band", &[("One", 60_000), ("Two", 60_000), ("Three", 60_000)]);
         let w = plan(&rec, Some(&r), vec![], None).warning.unwrap();
         assert!(w.contains("different edition"), "{w}");
+    }
+
+    #[test]
+    fn the_length_warning_measures_against_the_music_like_the_ranking() {
+        // 5.2% longer than the music (but only 4.9% of the release): it doesn't fit.
+        let r = candidate("m1", "Album", "Band", &[("One", 105_200)]);
+        assert!(fit_warning(100_000, &r).is_some());
+        assert!(fit_warning(100_000, &candidate("m2", "Album", "Band", &[("One", 105_000)])).is_none());
+        assert!(fit_warning(100_000, &candidate("m3", "Album", "Band", &[("One", 95_000)])).is_none());
     }
 
     #[test]
