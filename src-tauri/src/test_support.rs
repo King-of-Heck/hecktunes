@@ -221,3 +221,45 @@ mod tests {
     }
 }
 
+
+/// One stretch of a synthetic vinyl recording: `level` 0.0 is surface hiss (about -65 dBFS RMS),
+/// otherwise a 440 Hz tone with that peak amplitude (0..1].
+#[derive(Clone, Copy, Debug)]
+pub struct Part {
+    pub secs: f32,
+    pub level: f32,
+}
+
+pub const fn tone(secs: f32, level: f32) -> Part {
+    Part { secs, level }
+}
+
+#[allow(dead_code)] // used by later tasks (vinyl splitting tests)
+pub const fn hiss(secs: f32) -> Part {
+    Part { secs, level: 0.0 }
+}
+
+/// Writes a 16- or 24-bit integer WAV made of `parts`, the same signal on every channel.
+pub fn write_pattern_wav(path: &Path, rate: u32, channels: u16, bits: u16, parts: &[Part]) {
+    let spec = hound::WavSpec { channels, sample_rate: rate, bits_per_sample: bits, sample_format: hound::SampleFormat::Int };
+    let mut w = hound::WavWriter::create(path, spec).unwrap();
+    let full = ((1i64 << (bits - 1)) - 1) as f32;
+    let mut seed: u32 = 12345;
+    let mut n: u64 = 0;
+    for p in parts {
+        for _ in 0..(p.secs * rate as f32).round() as u64 {
+            let v = if p.level == 0.0 {
+                seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+                ((seed >> 8) as f32 / (1u32 << 24) as f32 * 2.0 - 1.0) * 0.001
+            } else {
+                (n as f32 * 440.0 * std::f32::consts::TAU / rate as f32).sin() * p.level
+            };
+            n += 1;
+            let s = (v * full) as i32;
+            for _ in 0..channels {
+                w.write_sample(s).unwrap();
+            }
+        }
+    }
+    w.finalize().unwrap();
+}

@@ -9,6 +9,7 @@ pub mod model;
 pub mod player;
 pub mod settings;
 pub mod tags;
+pub mod vinyl;
 #[cfg(test)]
 mod test_support;
 
