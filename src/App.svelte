@@ -54,14 +54,35 @@
       .sort((a, b) => a.job_id - b.job_id)[0] ?? null,
   );
 
+  // Why the library or playlists couldn't be loaded, shown in a banner instead of an empty library.
+  let loadError = $state<string | null>(null);
+
   async function refresh() {
-    albums = await api.listAlbums();
+    try {
+      albums = await api.listAlbums();
+      loadError = null;
+    } catch (e) {
+      console.error('refresh failed', e);
+      loadError = `Couldn't load your library: ${e}`;
+      return;
+    }
     bust++;
     songsVersion++;
   }
 
   async function refreshPlaylists() {
-    playlists = await api.listPlaylists();
+    try {
+      playlists = await api.listPlaylists();
+    } catch (e) {
+      console.error('playlists failed', e);
+      loadError = `Couldn't load your playlists: ${e}`;
+    }
+  }
+
+  async function retryLoad() {
+    loadError = null;
+    await refresh();
+    await refreshPlaylists();
   }
 
   function select(v: View) {
@@ -168,6 +189,9 @@
 <div class="layout">
   <Sidebar {view} needsCount={needs.length} {playlists} {syncing} onSelect={select} onCreatePlaylist={createPlaylist} />
   <main>
+    {#if loadError}
+      <p class="banner error">{loadError} <button class="link" onclick={retryLoad}>Try again</button></p>
+    {/if}
     {#if libraryUnavailable}
       <p class="banner">{libraryUnavailable} <button class="link" onclick={() => select({ kind: 'settings' })}>Settings</button></p>
     {/if}
@@ -251,5 +275,6 @@
   .crumbs h2 { margin: 4px 0 0; font-size: 22px; }
   .back { border: none; background: none; color: var(--accent); padding: 0; }
   .banner { margin: 0; padding: 8px 24px; background: var(--panel); border-bottom: 1px solid var(--border); color: var(--warn); }
+  .banner.error { color: var(--danger); }
   .link { border: none; background: none; color: var(--accent); padding: 0; }
 </style>
