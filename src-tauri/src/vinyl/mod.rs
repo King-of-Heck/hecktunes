@@ -151,10 +151,16 @@ pub fn plan(rec: &Recording, release: Option<&ReleaseCandidate>, candidates: Vec
         .iter()
         .map(|f| PlanFile { path: f.info.path.clone(), name: file_name(&f.info.path), duration_ms: f.info.duration_ms() })
         .collect();
-    let (tracks, warning) = match release {
+    let (mut tracks, warning) = match release {
         Some(r) if !r.tracks.is_empty() => (release_tracks(rec, r), fit_warning(rec.music_ms(), r)),
         _ => (gap_tracks(rec), None),
     };
+    // Envelope frames round the file's length up to 50 ms: keep every track inside its file.
+    for t in &mut tracks {
+        let dur = rec.files[t.file].info.duration_ms();
+        t.end_ms = t.end_ms.min(dur);
+        t.start_ms = t.start_ms.min(t.end_ms.saturating_sub(1));
+    }
     VinylPlan { files, release: release.cloned(), candidates, tracks, warning, note }
 }
 
@@ -398,6 +404,24 @@ mod tests {
         assert!(near(p.tracks[1].end_ms, 76_000), "{:?}", spans(&p));
         assert!(near(p.tracks[2].start_ms, 94_700), "{:?}", spans(&p));
         assert_eq!(p.warning, None);
+    }
+
+    #[test]
+    fn music_to_the_very_end_still_passes_the_check() {
+        // 44.1 kHz with no run-out and a length that isn't a whole number of 50 ms frames: the last
+        // envelope frame is short, so frame times overshoot the file.
+        let dir = tempfile::tempdir().unwrap();
+        let parts = [hiss(3.0), tone(30.0, 0.2), hiss(2.0), tone(40.0, 0.2), hiss(2.5), tone(20.03, 0.2)];
+        let rec = load(&[wav(dir.path(), "side.wav", 44100, &parts)]).unwrap();
+        let dur = rec.files[0].info.duration_ms();
+        assert_ne!(dur % 50, 0);
+        let p = plan(&rec, None, vec![], None);
+        assert_eq!(p.tracks.last().unwrap().end_ms, dur);
+        check_tracks(&rec, &p.tracks, None).unwrap();
+        let r = candidate("m1", "Album", "Band", &[("One", 30_000), ("Two", 40_000), ("Three", 20_000)]);
+        let p = plan(&rec, Some(&r), vec![], None);
+        assert_eq!(p.tracks.last().unwrap().end_ms, dur);
+        check_tracks(&rec, &p.tracks, Some(&r)).unwrap();
     }
 
     #[test]
