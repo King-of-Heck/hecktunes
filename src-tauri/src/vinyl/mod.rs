@@ -1,5 +1,6 @@
 //! Vinyl recording import: split a full-side (or full-album) WAV into tracks.
 pub mod wav;
+pub mod source;
 pub mod envelope;
 pub mod gaps;
 pub mod align;
@@ -17,7 +18,7 @@ use gaps::Analysis;
 use serde::{Deserialize, Serialize};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
-use wav::WavInfo;
+use source::SourceInfo;
 
 /// 5 s: in a one-file recording, the longest gap counts as the side flip only if at least this long.
 pub const FLIP_MIN_FRAMES: usize = 100;
@@ -27,7 +28,7 @@ pub const FIT_TOLERANCE: f64 = 0.05;
 const FLAC_SIZE_RATIO: f64 = 0.7;
 
 pub struct FileAnalysis {
-    pub info: WavInfo,
+    pub info: SourceInfo,
     pub db: Vec<f32>,
     pub analysis: Analysis,
 }
@@ -81,7 +82,7 @@ pub fn load(paths: &[PathBuf]) -> Result<Recording> {
     }
     let mut paths = paths.to_vec();
     paths.sort_by_key(|p| file_name(p).to_lowercase());
-    let infos = paths.iter().map(|p| wav::probe(p)).collect::<Result<Vec<_>>>()?;
+    let infos = paths.iter().map(|p| source::probe(p)).collect::<Result<Vec<_>>>()?;
     if let [a, b] = infos.as_slice() {
         if !a.same_format(b) {
             bail!("The two sides don't match ({} vs {}).", a.describe(), b.describe());

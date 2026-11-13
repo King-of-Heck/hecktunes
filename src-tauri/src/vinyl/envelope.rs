@@ -1,6 +1,6 @@
 //! Loudness of every 50 ms of a recording: the only view of the audio gap finding needs.
 
-use super::wav::{RangeReader, WavInfo};
+use super::source::{RangeReader, SourceInfo};
 use anyhow::Result;
 
 pub const FRAME_MS: u64 = 50;
@@ -24,7 +24,7 @@ fn to_db(rms: f64) -> f32 {
 }
 
 /// dBFS (RMS of the mono mix) of every 50 ms frame; the last frame may be shorter.
-pub fn envelope(info: &WavInfo) -> Result<Vec<f32>> {
+pub fn envelope(info: &SourceInfo) -> Result<Vec<f32>> {
     let frame_len = ((info.sample_rate as u64 * FRAME_MS / 1000) as usize).max(1);
     let ch = info.channels as usize;
     let full = (1i64 << (info.bits - 1)) as f64;
@@ -53,7 +53,7 @@ pub fn envelope(info: &WavInfo) -> Result<Vec<f32>> {
 mod tests {
     use super::*;
     use crate::test_support::{hiss, tone, write_pattern_wav};
-    use crate::vinyl::wav::probe;
+    use crate::vinyl::source::probe;
 
     #[test]
     fn measures_each_50ms_frame() {

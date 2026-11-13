@@ -1,6 +1,6 @@
 //! Writing one track: a frame range of the recording, losslessly, as FLAC.
 
-use super::wav::{RangeReader, WavInfo};
+use super::source::{RangeReader, SourceInfo};
 use anyhow::{anyhow, bail, ensure, Context as _, Result};
 use flacenc::bitsink::ByteSink;
 use flacenc::component::{BitRepr, Stream, StreamInfo};
@@ -18,7 +18,7 @@ fn flac_err(e: impl std::fmt::Debug) -> anyhow::Error {
 }
 
 /// Writes frames `[start, end)` of the recording to `dest` as FLAC.
-pub fn encode_range(info: &WavInfo, start: u64, end: u64, dest: &Path) -> Result<()> {
+pub fn encode_range(info: &SourceInfo, start: u64, end: u64, dest: &Path) -> Result<()> {
     if start >= end {
         bail!("Nothing to encode: the range {start}..{end} is empty.");
     }
@@ -31,7 +31,7 @@ pub fn encode_range(info: &WavInfo, start: u64, end: u64, dest: &Path) -> Result
 
 /// Encodes a block at a time and writes each frame straight to the file, so neither the PCM nor the
 /// encoded track is ever all in memory. STREAMINFO is written last, over a placeholder at the start.
-fn write_flac(info: &WavInfo, start: u64, end: u64, dest: &Path) -> Result<()> {
+fn write_flac(info: &SourceInfo, start: u64, end: u64, dest: &Path) -> Result<()> {
     let config = flacenc::config::Encoder::default()
         .into_verified()
         .map_err(|e| anyhow!("FLAC encoder settings rejected: {e:?}"))?;
@@ -78,7 +78,7 @@ fn write_flac(info: &WavInfo, start: u64, end: u64, dest: &Path) -> Result<()> {
 mod tests {
     use super::*;
     use crate::test_support::{tone, write_pattern_wav};
-    use crate::vinyl::wav::{probe, read_range};
+    use crate::vinyl::source::{probe, read_range};
     use symphonia::core::codecs::audio::AudioDecoderOptions;
     use symphonia::core::formats::probe::Hint;
     use symphonia::core::formats::{FormatOptions, TrackType};

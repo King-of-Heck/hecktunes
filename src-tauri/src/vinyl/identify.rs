@@ -1,7 +1,7 @@
 //! Finding the album: fingerprint the longest pieces and rank the releases they point to.
 
 use super::envelope::frame_to_ms;
-use super::{fits, release_ms, wav, Recording};
+use super::{fits, release_ms, source, Recording};
 use crate::identify::fingerprint::{fingerprint_pcm, MAX_SECONDS};
 use crate::identify::net::is_network_failure;
 use crate::identify::{MetadataSource, MAX_CANDIDATES};
@@ -14,11 +14,11 @@ pub const MAX_PIECES: usize = 3;
 /// Pieces shorter than this are skipped (intros, false splits).
 pub const MIN_PIECE_MS: u64 = 30_000;
 
-fn piece_fingerprint(info: &wav::WavInfo, start_frame: usize, end_frame: usize) -> Result<String> {
+fn piece_fingerprint(info: &source::SourceInfo, start_frame: usize, end_frame: usize) -> Result<String> {
     let start = info.ms_to_frame(frame_to_ms(start_frame));
     let end = info.ms_to_frame(frame_to_ms(end_frame)).min(start + MAX_SECONDS * info.sample_rate as u64);
     let shift = info.bits - 16;
-    let pcm: Vec<i16> = wav::read_range(info, start, end)?.iter().map(|&s| (s >> shift) as i16).collect();
+    let pcm: Vec<i16> = source::read_range(info, start, end)?.iter().map(|&s| (s >> shift) as i16).collect();
     fingerprint_pcm(&pcm, info.sample_rate, info.channels as u32)
 }
 

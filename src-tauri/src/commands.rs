@@ -125,7 +125,7 @@ fn preview_window(at_ms: u64, duration_ms: u64) -> Option<(u64, u64)> {
 pub fn vinyl_preview(state: State<AppState>, path: String, at_ms: u64) -> CmdResult<()> {
     // One Listen at a time: a second click must not rewrite the clip while the first writes or plays it.
     let _one_at_a_time = state.preview_lock.lock().unwrap_or_else(|p| p.into_inner());
-    let info = crate::vinyl::wav::probe(std::path::Path::new(&path)).map_err(|e| format!("{e:#}"))?;
+    let info = crate::vinyl::source::probe(std::path::Path::new(&path)).map_err(|e| format!("{e:#}"))?;
     let (from, to) = preview_window(at_ms, info.duration_ms()).ok_or("That recording has no audio to play.")?;
     // The player may be holding the previous clip open; it must let go before it is rewritten.
     if !state.player.stop_and_wait(PLAYER_STOP_TIMEOUT) {
