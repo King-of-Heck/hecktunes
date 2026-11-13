@@ -63,7 +63,7 @@
   );
 
   async function importVinyl() {
-    const picked = await open({ multiple: true, title: 'Choose a vinyl recording (one WAV, or one per side)', filters: [{ name: 'WAV', extensions: ['wav'] }] });
+    const picked = await open({ multiple: true, title: 'Choose a vinyl recording (one file, or one per side)', filters: [{ name: 'Recording', extensions: ['wav', 'mp3'] }] });
     if (!picked || picked.length === 0) return;
     api.importVinyl(picked).catch(logError('vinyl import failed'));
   }

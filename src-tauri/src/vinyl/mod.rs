@@ -1,4 +1,4 @@
-//! Vinyl recording import: split a full-side (or full-album) WAV into tracks.
+//! Vinyl recording import: split a full-side (or full-album) WAV or MP3 into tracks.
 pub mod wav;
 pub mod source;
 pub mod mp3;
@@ -74,17 +74,20 @@ fn file_name(p: &Path) -> String {
     p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
 }
 
-/// Probes, orders and analyses one or two WAVs.
+/// Probes, orders and analyses one or two recordings (WAV or MP3).
 pub fn load(paths: &[PathBuf]) -> Result<Recording> {
     match paths.len() {
         1 | 2 => {}
-        0 => bail!("Choose a WAV recording."),
-        n => bail!("Choose one or two WAV files (one per side), not {n}."),
+        0 => bail!("Choose a WAV or MP3 recording."),
+        n => bail!("Choose one or two files (one per side), not {n}."),
     }
     let mut paths = paths.to_vec();
     paths.sort_by_key(|p| file_name(p).to_lowercase());
     let infos = paths.iter().map(|p| source::probe(p)).collect::<Result<Vec<_>>>()?;
     if let [a, b] = infos.as_slice() {
+        if a.kind() != b.kind() {
+            bail!("The two sides don't match ({} vs {}).", a.kind(), b.kind());
+        }
         if !a.same_format(b) {
             bail!("The two sides don't match ({} vs {}).", a.describe(), b.describe());
         }
@@ -373,6 +376,41 @@ mod tests {
         let e = format!("{:#}", load(&[a.clone(), c]).err().unwrap());
         assert!(e.contains("don't match"), "{e}");
         assert!(load(&[a.clone(), a.clone(), a]).is_err());
+    }
+
+    fn fixture(name: &str) -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/vinyl").join(name)
+    }
+
+    #[test]
+    fn mp3_gaps_are_found() {
+        let rec = load(&[fixture("cbr.mp3")]).unwrap();
+        assert_eq!(rec.files.len(), 1);
+        let a = &rec.files[0].analysis;
+        assert_eq!(a.gaps.len(), 2, "{:?}", a.gaps);
+        let within = |g: &Gap, r: Range<usize>| r.start <= g.start && g.end <= r.end;
+        assert!(within(&a.gaps[0], 120..160), "{:?}", a.gaps[0]);
+        assert!(within(&a.gaps[1], 260..300), "{:?}", a.gaps[1]);
+        assert!((15..25).contains(&a.music_start), "{}", a.music_start);
+    }
+
+    #[test]
+    fn two_mp3s_at_different_bitrates_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let (a, b) = (dir.path().join("Side A.mp3"), dir.path().join("Side B.mp3"));
+        std::fs::copy(fixture("cbr.mp3"), &a).unwrap();
+        std::fs::copy(fixture("vbr.mp3"), &b).unwrap();
+        assert_eq!(load(&[a, b]).unwrap().files.len(), 2);
+    }
+
+    #[test]
+    fn wav_and_mp3_sides_fail() {
+        let dir = tempfile::tempdir().unwrap();
+        let (a, b) = (dir.path().join("Side A.wav"), dir.path().join("Side B.mp3"));
+        write_pattern_wav(&a, 44100, 2, 16, &[tone(3.0, 0.2)]);
+        std::fs::copy(fixture("cbr.mp3"), &b).unwrap();
+        let e = format!("{:#}", load(&[a, b]).err().unwrap());
+        assert!(e.contains("The two sides don't match (WAV vs MP3)"), "{e}");
     }
 
     #[test]

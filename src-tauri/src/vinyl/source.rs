@@ -1,13 +1,20 @@
 //! One interface over the recording formats: probing and reading frame ranges.
 
+use super::mp3::decode::Mp3Reader;
+use super::mp3::index::{self, Index};
 use super::wav;
-use anyhow::Result;
+use anyhow::{Context, Result};
+use std::fs::File;
+use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Format {
     /// `float`: a 32-bit float WAV, delivered as 24-bit.
     Wav { float: bool },
+    /// An MP3, delivered as 16-bit; reads are positioned by its frame index.
+    Mp3(Arc<Index>),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -32,35 +39,43 @@ impl SourceInfo {
         (ms * self.sample_rate as u64 / 1000).min(self.frames)
     }
 
-    /// Same rate, depth, channels and format, so two sides can become one album.
+    /// Same kind, rate and channels (and for WAVs the same depth), so two sides can become one
+    /// album. Two MP3s may differ in bitrate.
     pub fn same_format(&self, other: &SourceInfo) -> bool {
-        (self.sample_rate, self.channels, self.bits, &self.format) == (other.sample_rate, other.channels, other.bits, &other.format)
+        let same_layout = (self.sample_rate, self.channels) == (other.sample_rate, other.channels);
+        match (&self.format, &other.format) {
+            (Format::Wav { float: a }, Format::Wav { float: b }) => same_layout && self.bits == other.bits && a == b,
+            (Format::Mp3(_), Format::Mp3(_)) => same_layout,
+            _ => false,
+        }
     }
 
-    /// e.g. "44.1 kHz, 16-bit, stereo".
+    /// e.g. "44.1 kHz, 16-bit, stereo" for a WAV, "MP3, 44.1 kHz, stereo" for an MP3.
     pub fn describe(&self) -> String {
         let khz = self.sample_rate as f64 / 1000.0;
-        let rate = if khz.fract() == 0.0 { format!("{khz:.0}") } else { format!("{khz:.1}") };
-        let depth = match self.format {
-            Format::Wav { float: true } => "32-bit float".to_string(),
-            Format::Wav { float: false } => format!("{}-bit", self.bits),
-        };
+        let rate = if khz.fract() == 0.0 { format!("{khz:.0}") } else { format!("{khz:.2}").trim_end_matches('0').to_string() };
         let layout = if self.channels == 1 { "mono" } else { "stereo" };
-        format!("{rate} kHz, {depth}, {layout}")
+        match self.format {
+            Format::Wav { float: true } => format!("{rate} kHz, 32-bit float, {layout}"),
+            Format::Wav { float: false } => format!("{rate} kHz, {}-bit, {layout}", self.bits),
+            Format::Mp3(_) => format!("MP3, {rate} kHz, {layout}"),
+        }
     }
 
     /// The kind of file, for messages.
     pub fn kind(&self) -> &'static str {
         match self.format {
             Format::Wav { .. } => "WAV",
+            Format::Mp3(_) => "MP3",
         }
     }
 
-    /// Bytes of WAV audio per second.
+    /// Bytes of WAV audio per second. For an MP3 this is the rate of the 16-bit PCM it decodes
+    /// to, not of the file; only meaningful for WAVs.
     pub fn byte_rate(&self) -> u64 {
         let bytes = match self.format {
             Format::Wav { float: true } => 4,
-            Format::Wav { float: false } => self.bits as u64 / 8,
+            Format::Wav { float: false } | Format::Mp3(_) => self.bits as u64 / 8,
         };
         self.sample_rate as u64 * self.channels as u64 * bytes
     }
@@ -68,6 +83,7 @@ impl SourceInfo {
 
 enum Backend {
     Wav(wav::WavReader),
+    Mp3(Mp3Reader),
 }
 
 /// Reads frames `[start, end)` of a recording in chunks, as interleaved integers at `SourceInfo::bits`.
@@ -77,6 +93,7 @@ impl RangeReader {
     pub fn open(info: &SourceInfo, start: u64, end: u64) -> Result<Self> {
         Ok(Self(match &info.format {
             Format::Wav { .. } => Backend::Wav(wav::WavReader::open(info, start, end)?),
+            Format::Mp3(index) => Backend::Mp3(Mp3Reader::open(&info.path, index.clone(), start, end)?),
         }))
     }
 
@@ -85,12 +102,28 @@ impl RangeReader {
     pub fn read(&mut self, max_frames: usize, out: &mut Vec<i32>) -> Result<usize> {
         match &mut self.0 {
             Backend::Wav(r) => r.read(max_frames, out),
+            Backend::Mp3(r) => r.read(max_frames, out),
         }
     }
 }
 
+/// A WAV (by its RIFF header) or an MP3 (anything else; `index::scan` explains what it isn't).
 pub fn probe(path: &Path) -> Result<SourceInfo> {
-    wav::probe(path)
+    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let mut magic = Vec::with_capacity(4);
+    File::open(path).with_context(|| format!("cannot open {name}"))?.take(4).read_to_end(&mut magic)?;
+    if magic == b"RIFF" {
+        return wav::probe(path);
+    }
+    let index = index::scan(path)?;
+    Ok(SourceInfo {
+        path: path.to_path_buf(),
+        sample_rate: index.sample_rate,
+        channels: index.channels,
+        bits: 16,
+        frames: index.total_samples(),
+        format: Format::Mp3(Arc::new(index)),
+    })
 }
 
 /// All of frames `[start, end)` at once (for short ranges).
@@ -174,6 +207,47 @@ mod tests {
         assert_eq!(info.bits, 24);
         let got = read_range(&info, 0, 100).unwrap();
         assert_eq!(got[0], 4_194_303);
+    }
+
+    fn fixture(name: &str) -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/vinyl").join(name)
+    }
+
+    #[test]
+    fn probe_mp3() {
+        let info = probe(&fixture("cbr.mp3")).unwrap();
+        let Format::Mp3(index) = &info.format else { panic!("not MP3: {:?}", info.format) };
+        assert_eq!(info.kind(), "MP3");
+        assert_eq!((info.bits, info.channels, info.sample_rate), (16, 2, 44100));
+        assert_eq!(info.frames, index.total_samples());
+        assert_eq!(info.describe(), "MP3, 44.1 kHz, stereo");
+        assert_eq!(probe(&fixture("mono22k.mp3")).unwrap().describe(), "MP3, 22.05 kHz, mono");
+    }
+
+    #[test]
+    fn probe_messages() {
+        let dir = tempfile::tempdir().unwrap();
+        let junk = dir.path().join("junk.bin");
+        std::fs::write(&junk, b"hello world").unwrap();
+        let e = format!("{:#}", probe(&junk).unwrap_err());
+        assert!(e.contains("junk.bin is not a WAV or MP3 file HeckTunes can read"), "{e}");
+        let e = format!("{:#}", probe(&fixture("layer2.mp2")).unwrap_err());
+        assert!(e.contains("is not an MP3 (Layer III) file"), "{e}");
+        let wav = dir.path().join("a.wav");
+        write_pattern_wav(&wav, 44100, 2, 16, &[tone(0.1, 0.5)]);
+        assert_eq!(probe(&wav).unwrap().kind(), "WAV");
+    }
+
+    #[test]
+    fn same_format_for_mp3s_ignores_bitrate_but_not_kind() {
+        let (cbr, vbr, mono) = (probe(&fixture("cbr.mp3")).unwrap(), probe(&fixture("vbr.mp3")).unwrap(), probe(&fixture("mono22k.mp3")).unwrap());
+        assert!(cbr.same_format(&vbr));
+        assert!(!cbr.same_format(&mono));
+        let dir = tempfile::tempdir().unwrap();
+        let wav = dir.path().join("a.wav");
+        write_pattern_wav(&wav, 44100, 2, 16, &[tone(0.1, 0.5)]);
+        let wav = probe(&wav).unwrap();
+        assert!(!wav.same_format(&cbr) && !cbr.same_format(&wav));
     }
 
     #[test]
