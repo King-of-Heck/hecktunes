@@ -5,6 +5,7 @@ use crate::import::apply::{pick_cover, stage};
 use crate::import::scan::{scan_paths, scan_paths_excluding, AlbumGroup};
 use crate::library::{paths, Library};
 use crate::model::ReleaseCandidate;
+use crate::vinyl::{self, PlanTrack, Recording, VinylPlan};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -17,6 +18,8 @@ use std::thread;
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum JobState {
     Queued,
+    /// Vinyl: reading the recording and finding the gaps.
+    Analysing,
     Identifying,
     NeedsChoice {
         candidates: Vec<ReleaseCandidate>,
@@ -25,6 +28,8 @@ pub enum JobState {
         current: Option<String>,
     },
     Duplicate { release: ReleaseCandidate, existing_album_id: i64 },
+    /// Vinyl: waiting for the user to check the cuts.
+    NeedsVinylReview { plan: VinylPlan },
     Importing,
     Done {
         album_id: i64,
@@ -38,6 +43,7 @@ pub enum JobState {
 }
 
 const NOTE_NOT_FOUND: &str = "No match found online";
+const NOTE_NO_MATCH_CHOSEN: &str = "Imported without a match";
 
 /// Why an import went in unmatched after a failed lookup.
 fn lookup_failure_note(e: &anyhow::Error) -> String {
@@ -66,10 +72,15 @@ pub enum JobChoice {
     Skip,
     Replace,
     Search { query: String },
+    /// Vinyl: use this release instead and recompute the cuts.
+    VinylRealign { mbid: String },
+    /// Vinyl: write these tracks; `matched` false imports without the release.
+    VinylConfirm { tracks: Vec<PlanTrack>, matched: bool },
 }
 
 pub enum Command {
     Import(Vec<PathBuf>),
+    ImportVinyl(Vec<PathBuf>),
     Reimport { album_id: i64, job_id: u64 },
     Resolve { job_id: u64, choice: JobChoice },
 }
@@ -86,11 +97,30 @@ impl ImportQueue {
         source: Arc<dyn MetadataSource>,
         notify: impl Fn(JobUpdate) + Send + 'static,
     ) -> Self {
+        Self::start_with_tmp(lib, source, std::env::temp_dir().join("hecktunes-vinyl"), notify)
+    }
+
+    /// `vinyl_tmp` holds the FLACs vinyl imports write before they are copied into the library.
+    pub fn start_with_tmp(
+        lib: Arc<Mutex<Library>>,
+        source: Arc<dyn MetadataSource>,
+        vinyl_tmp: PathBuf,
+        notify: impl Fn(JobUpdate) + Send + 'static,
+    ) -> Self {
         let (tx, rx) = channel();
         let next_id = Arc::new(AtomicU64::new(1));
         // The root never changes after the library is opened; keep a copy so files can be staged unlocked.
         let root = lib.lock().unwrap().root().to_path_buf();
-        let worker = Worker { lib, root, source, notify: Box::new(notify), next_id: next_id.clone(), pending: HashMap::new() };
+        let worker = Worker {
+            lib,
+            root,
+            source,
+            notify: Box::new(notify),
+            next_id: next_id.clone(),
+            pending: HashMap::new(),
+            vinyl_tmp,
+            pending_vinyl: HashMap::new(),
+        };
         thread::spawn(move || worker.run(rx));
         Self { tx, next_id }
     }
@@ -107,6 +137,23 @@ impl ImportQueue {
     }
 }
 
+/// A folder deleted when dropped: the FLACs a vinyl import wrote, kept until its job is done with them.
+struct TempFolder(PathBuf);
+
+impl Drop for TempFolder {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// A vinyl recording waiting on its review.
+struct VinylJob {
+    id: u64,
+    label: String,
+    rec: Recording,
+    plan: VinylPlan,
+}
+
 struct Job {
     id: u64,
     label: String,
@@ -118,6 +165,8 @@ struct Job {
     candidates: Vec<ReleaseCandidate>,
     /// Release waiting on a Duplicate decision.
     chosen: Option<ReleaseCandidate>,
+    /// Vinyl imports: the temporary FLACs, deleted when the job ends.
+    _temp: Option<TempFolder>,
 }
 
 struct Worker {
@@ -127,6 +176,8 @@ struct Worker {
     notify: Box<dyn Fn(JobUpdate) + Send>,
     next_id: Arc<AtomicU64>,
     pending: HashMap<u64, Job>,
+    vinyl_tmp: PathBuf,
+    pending_vinyl: HashMap<u64, VinylJob>,
 }
 
 impl Worker {
@@ -134,6 +185,7 @@ impl Worker {
         while let Ok(cmd) = rx.recv() {
             match cmd {
                 Command::Import(paths) => self.import(paths),
+                Command::ImportVinyl(paths) => self.import_vinyl(paths),
                 Command::Reimport { album_id, job_id } => self.reimport(album_id, job_id),
                 Command::Resolve { job_id, choice } => self.resolve(job_id, choice),
             }
@@ -162,7 +214,7 @@ impl Worker {
                 let id = self.new_id();
                 let label = group.label();
                 self.emit(id, &label, JobState::Queued);
-                Job { id, label, group, replace_album_id: None, current: None, candidates: vec![], chosen: None }
+                Job { id, label, group, replace_album_id: None, current: None, candidates: vec![], chosen: None, _temp: None }
             })
             .collect();
         for job in jobs {
@@ -190,7 +242,7 @@ impl Worker {
             return;
         }
         let group = scan.groups.remove(0);
-        self.identify_job(Job { id, label, group, replace_album_id: Some(album_id), current: album.mb_release_id.clone(), candidates: vec![], chosen: None });
+        self.identify_job(Job { id, label, group, replace_album_id: Some(album_id), current: album.mb_release_id.clone(), candidates: vec![], chosen: None, _temp: None });
     }
 
     fn identify_job(&mut self, mut job: Job) {
@@ -265,9 +317,12 @@ impl Worker {
         // Copy and tag without the library lock; take it only for the DB transaction.
         let result = stage(&self.root, &job.group, None, cover, needs_metadata)
             .and_then(|staged| staged.commit(&mut self.lib.lock().unwrap()));
+        // Free a vinyl import's temporary FLACs before reporting, so the report is the last word.
+        let (id, label) = (job.id, job.label.clone());
+        drop(job);
         match result {
-            Ok(album_id) => self.emit(job.id, &job.label, JobState::Done { album_id, matched: false, note }),
-            Err(e) => self.emit(job.id, &job.label, JobState::Failed { error: format!("{e:#}") }),
+            Ok(album_id) => self.emit(id, &label, JobState::Done { album_id, matched: false, note }),
+            Err(e) => self.emit(id, &label, JobState::Failed { error: format!("{e:#}") }),
         }
     }
 
@@ -292,13 +347,106 @@ impl Worker {
             }
         }
         drop(lib);
+        // Free a vinyl import's temporary FLACs before reporting, so the report is the last word.
+        let (id, label) = (job.id, job.label.clone());
+        drop(job);
         match result {
-            Ok(album_id) => self.emit(job.id, &job.label, JobState::Done { album_id, matched: release.is_some(), note: None }),
-            Err(e) => self.emit(job.id, &job.label, JobState::Failed { error: format!("{e:#}") }),
+            Ok(album_id) => self.emit(id, &label, JobState::Done { album_id, matched: release.is_some(), note: None }),
+            Err(e) => self.emit(id, &label, JobState::Failed { error: format!("{e:#}") }),
+        }
+    }
+
+    fn import_vinyl(&mut self, paths: Vec<PathBuf>) {
+        let id = self.new_id();
+        let label = vinyl_label(&paths);
+        self.emit(id, &label, JobState::Analysing);
+        let rec = match vinyl::load(&paths) {
+            Ok(rec) => rec,
+            Err(e) => return self.emit(id, &label, JobState::Failed { error: format!("{e:#}") }),
+        };
+        self.emit(id, &label, JobState::Identifying);
+        let (candidates, note) = match vinyl::identify::identify(&rec, self.source.as_ref()) {
+            Ok(c) if c.is_empty() => (c, Some(NOTE_NOT_FOUND.to_string())),
+            Ok(c) => (c, None),
+            Err(e) => (vec![], Some(lookup_failure_note(&e))),
+        };
+        let plan = vinyl::plan(&rec, candidates.first(), candidates.clone(), note);
+        self.vinyl_review(VinylJob { id, label, rec, plan });
+    }
+
+    fn vinyl_review(&mut self, job: VinylJob) {
+        self.emit(job.id, &job.label, JobState::NeedsVinylReview { plan: job.plan.clone() });
+        self.pending_vinyl.insert(job.id, job);
+    }
+
+    fn resolve_vinyl(&mut self, mut job: VinylJob, choice: JobChoice) {
+        match choice {
+            JobChoice::Skip => self.emit(job.id, &job.label, JobState::Skipped),
+            JobChoice::VinylRealign { mbid } => {
+                self.emit(job.id, &job.label, JobState::Analysing);
+                let known = job.plan.candidates.iter().find(|c| c.mbid == mbid).cloned();
+                match known.map(Ok).unwrap_or_else(|| self.source.release(&mbid)) {
+                    Ok(r) => {
+                        let mut candidates = job.plan.candidates.clone();
+                        if !candidates.iter().any(|c| c.mbid == r.mbid) {
+                            candidates.insert(0, r.clone());
+                        }
+                        job.plan = vinyl::plan(&job.rec, Some(&r), candidates, job.plan.note.clone());
+                    }
+                    Err(e) => job.plan.warning = Some(format!("Couldn't load that release ({e:#}).")),
+                }
+                self.vinyl_review(job);
+            }
+            JobChoice::Search { query } => {
+                match self.source.search_text(&query) {
+                    Ok(ids) => {
+                        job.plan.candidates =
+                            ids.iter().take(crate::identify::MAX_CANDIDATES).filter_map(|id| self.source.release(id).ok()).collect();
+                    }
+                    Err(e) => job.plan.warning = Some(format!("Search failed ({e:#}).")),
+                }
+                self.vinyl_review(job);
+            }
+            JobChoice::VinylConfirm { tracks, matched } => self.confirm_vinyl(job, tracks, matched),
+            // Choices for normal imports don't apply here: keep waiting.
+            JobChoice::Pick { .. } | JobChoice::KeepExisting | JobChoice::Replace => self.vinyl_review(job),
+        }
+    }
+
+    fn confirm_vinyl(&mut self, job: VinylJob, tracks: Vec<PlanTrack>, matched: bool) {
+        let release = if matched { job.plan.release.clone() } else { None };
+        if let Err(e) = vinyl::check_tracks(&job.rec, &tracks, release.as_ref()) {
+            return self.emit(job.id, &job.label, JobState::Failed { error: format!("{e:#}") });
+        }
+        self.emit(job.id, &job.label, JobState::Importing);
+        let dir = TempFolder(self.vinyl_tmp.join(format!("job-{}", job.id)));
+        let group = match vinyl::write_tracks(&job.rec, &tracks, &dir.0) {
+            Ok(g) => g,
+            Err(e) => return self.emit(job.id, &job.label, JobState::Failed { error: format!("{e:#}") }),
+        };
+        let import = Job {
+            id: job.id,
+            label: job.label.clone(),
+            group,
+            replace_album_id: None,
+            current: None,
+            candidates: vec![],
+            chosen: None,
+            _temp: Some(dir),
+        };
+        match release {
+            Some(r) => self.proceed(import, r),
+            None => {
+                let note = job.plan.note.clone().unwrap_or_else(|| NOTE_NO_MATCH_CHOSEN.to_string());
+                self.finish_unmatched(import, true, Some(note))
+            }
         }
     }
 
     fn resolve(&mut self, job_id: u64, choice: JobChoice) {
+        if let Some(job) = self.pending_vinyl.remove(&job_id) {
+            return self.resolve_vinyl(job, choice);
+        }
         let Some(mut job) = self.pending.remove(&job_id) else { return };
         match choice {
             JobChoice::Skip => self.emit(job.id, &job.label, JobState::Skipped),
@@ -320,6 +468,10 @@ impl Worker {
                     Err(e) => self.emit(job.id, &job.label, JobState::Failed { error: format!("{e:#}") }),
                 }
             }
+            // Vinyl choices don't apply to a normal import: keep waiting.
+            JobChoice::VinylRealign { .. } | JobChoice::VinylConfirm { .. } => {
+                self.pending.insert(job.id, job);
+            }
             JobChoice::Search { query } => {
                 let ids = match self.source.search_text(&query) {
                     Ok(ids) => ids,
@@ -339,6 +491,13 @@ impl Worker {
             }
         }
     }
+}
+
+/// "Side A + Side B" from the file names.
+fn vinyl_label(paths: &[PathBuf]) -> String {
+    let mut names: Vec<String> = paths.iter().filter_map(|p| p.file_stem()).map(|s| s.to_string_lossy().into_owned()).collect();
+    names.sort_by_key(|n| n.to_lowercase());
+    names.join(" + ")
 }
 
 /// Removes the superseded albums (with their files) and moves the new album out of a
@@ -1035,5 +1194,116 @@ mod tests {
         // Deleting it now would drop its playlist lines: the old album must stay.
         assert!(lib.album(old).unwrap().is_some());
         assert_eq!(lib.playlist_entries(p).unwrap()[0].song.track.id, t[0]);
+    }
+
+    use crate::test_support::{hiss, tone, write_pattern_wav, VinylFake};
+
+    struct VinylHarness {
+        dir: tempfile::TempDir,
+        side: PathBuf,
+        lib: Arc<Mutex<Library>>,
+        queue: ImportQueue,
+        rx: Receiver<JobUpdate>,
+    }
+
+    fn vinyl_harness(source: impl MetadataSource + 'static) -> VinylHarness {
+        let dir = tempfile::tempdir().unwrap();
+        let side = dir.path().join("Side A.wav");
+        write_pattern_wav(&side, 8000, 1, 16, &[hiss(3.0), tone(30.0, 0.2), hiss(2.0), tone(40.0, 0.2), hiss(2.5), tone(20.0, 0.2), hiss(4.0)]);
+        let lib = Arc::new(Mutex::new(Library::open_in_memory(dir.path().join("lib")).unwrap()));
+        let (tx, rx) = channel();
+        let queue = ImportQueue::start_with_tmp(lib.clone(), Arc::new(source), dir.path().join("tmp"), move |u| {
+            let _ = tx.send(u);
+        });
+        VinylHarness { dir, side, lib, queue, rx }
+    }
+
+    const SIDE_TL: [(&str, u64); 3] = [("One", 30_000), ("Two", 40_000), ("Three", 20_000)];
+
+    fn review(rx: &Receiver<JobUpdate>) -> (u64, crate::vinyl::VinylPlan) {
+        let ups = until(rx, |s| matches!(s, JobState::NeedsVinylReview { .. }) || is_terminal(s));
+        let last = ups.last().unwrap();
+        assert!(ups.iter().any(|u| matches!(u.state, JobState::Analysing)));
+        match &last.state {
+            JobState::NeedsVinylReview { plan } => (last.job_id, plan.clone()),
+            other => panic!("expected a vinyl review, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn vinyl_match_is_reviewed_then_imported_as_flac() {
+        let fake = VinylFake { releases: vec![candidate("m1", "Album", "Band", &SIDE_TL)], fingerprint_ids: vec!["m1".into()], offline: false };
+        let h = vinyl_harness(fake);
+        h.queue.send(Command::ImportVinyl(vec![h.side.clone()]));
+        let (job_id, plan) = review(&h.rx);
+        assert_eq!(plan.release.as_ref().map(|r| r.mbid.as_str()), Some("m1"));
+        h.queue.send(Command::Resolve { job_id, choice: JobChoice::VinylConfirm { tracks: plan.tracks, matched: true } });
+        let ups = until(&h.rx, is_terminal);
+        assert!(matches!(ups.last().unwrap().state, JobState::Done { matched: true, .. }), "{:?}", ups.last());
+        let lib = h.lib.lock().unwrap();
+        let album = lib.list_albums().unwrap().remove(0);
+        let tracks = lib.album_tracks(album.id).unwrap();
+        assert_eq!(tracks.iter().map(|t| t.title.as_str()).collect::<Vec<_>>(), ["One", "Two", "Three"]);
+        assert!(tracks.iter().all(|t| t.format == "flac"));
+        assert!(!h.dir.path().join("tmp").join(format!("job-{job_id}")).exists(), "temporary FLACs removed");
+    }
+
+    #[test]
+    fn vinyl_without_a_match_imports_needing_metadata() {
+        let h = vinyl_harness(VinylFake { releases: vec![], fingerprint_ids: vec![], offline: false });
+        h.queue.send(Command::ImportVinyl(vec![h.side.clone()]));
+        let (job_id, plan) = review(&h.rx);
+        assert!(plan.release.is_none());
+        assert_eq!(plan.note.as_deref(), Some("No match found online"));
+        h.queue.send(Command::Resolve { job_id, choice: JobChoice::VinylConfirm { tracks: plan.tracks, matched: false } });
+        assert!(matches!(until(&h.rx, is_terminal).last().unwrap().state, JobState::Done { matched: false, .. }));
+        let album = h.lib.lock().unwrap().list_albums().unwrap().remove(0);
+        assert!(album.needs_metadata);
+    }
+
+    #[test]
+    fn vinyl_offline_still_offers_the_gaps() {
+        let h = vinyl_harness(VinylFake { releases: vec![], fingerprint_ids: vec![], offline: true });
+        h.queue.send(Command::ImportVinyl(vec![h.side.clone()]));
+        let (_, plan) = review(&h.rx);
+        assert_eq!(plan.tracks.len(), 3);
+        assert!(plan.note.unwrap().contains("Couldn't reach"));
+    }
+
+    #[test]
+    fn vinyl_change_release_replans() {
+        let other = candidate("m2", "Album (Remaster)", "Band", &SIDE_TL);
+        let fake = VinylFake { releases: vec![candidate("m1", "Album", "Band", &SIDE_TL), other], fingerprint_ids: vec!["m1".into()], offline: false };
+        let h = vinyl_harness(fake);
+        h.queue.send(Command::ImportVinyl(vec![h.side.clone()]));
+        let (job_id, _) = review(&h.rx);
+        h.queue.send(Command::Resolve { job_id, choice: JobChoice::VinylRealign { mbid: "m2".into() } });
+        let (_, plan) = review(&h.rx);
+        assert_eq!(plan.release.unwrap().mbid, "m2");
+    }
+
+    #[test]
+    fn vinyl_confirm_with_the_wrong_piece_count_fails() {
+        let fake = VinylFake { releases: vec![candidate("m1", "Album", "Band", &SIDE_TL)], fingerprint_ids: vec!["m1".into()], offline: false };
+        let h = vinyl_harness(fake);
+        h.queue.send(Command::ImportVinyl(vec![h.side.clone()]));
+        let (job_id, plan) = review(&h.rx);
+        h.queue.send(Command::Resolve { job_id, choice: JobChoice::VinylConfirm { tracks: plan.tracks[..2].to_vec(), matched: true } });
+        match &until(&h.rx, is_terminal).last().unwrap().state {
+            JobState::Failed { error } => assert!(error.contains("pieces"), "{error}"),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn vinyl_sides_that_differ_fail() {
+        let h = vinyl_harness(VinylFake { releases: vec![], fingerprint_ids: vec![], offline: false });
+        let b = h.dir.path().join("Side B.wav");
+        write_pattern_wav(&b, 16000, 1, 16, &[tone(5.0, 0.2)]);
+        h.queue.send(Command::ImportVinyl(vec![h.side.clone(), b]));
+        match &until(&h.rx, is_terminal).last().unwrap().state {
+            JobState::Failed { error } => assert!(error.contains("don't match"), "{error}"),
+            other => panic!("{other:?}"),
+        }
     }
 }
