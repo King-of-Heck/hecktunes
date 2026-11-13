@@ -25,6 +25,7 @@ anyhow = "1"
 blake3 = "1.8"
 rusqlite = { version = "0.41", features = ["bundled"] }
 lofty = "0.25"
+flacenc = "0.5"
 symphonia = { version = "0.6", features = ["all-codecs", "all-formats"] }
 rusty-chromaprint = "0.3"
 hound = "3.5"
