@@ -283,11 +283,13 @@ pub fn db_frames(parts: &[(f32, f32)]) -> Vec<f32> {
 }
 
 /// A music database for vinyl tests: every fingerprint finds `fingerprint_ids`; `offline` makes
-/// every lookup fail like a dropped connection.
+/// every lookup fail like a dropped connection; a text search for `no_results_for` finds nothing
+/// (any other search finds every release).
 pub struct VinylFake {
     pub releases: Vec<ReleaseCandidate>,
     pub fingerprint_ids: Vec<String>,
     pub offline: bool,
+    pub no_results_for: Option<&'static str>,
 }
 
 impl VinylFake {
@@ -300,8 +302,9 @@ impl MetadataSource for VinylFake {
     fn search(&self, _a: &str, _b: &str, _n: usize) -> anyhow::Result<Vec<String>> {
         Ok(vec![])
     }
-    fn search_text(&self, _q: &str) -> anyhow::Result<Vec<String>> {
+    fn search_text(&self, q: &str) -> anyhow::Result<Vec<String>> {
         if self.offline { return self.down(); }
+        if self.no_results_for == Some(q) { return Ok(vec![]); }
         Ok(self.releases.iter().map(|r| r.mbid.clone()).collect())
     }
     fn by_fingerprint(&self, _t: &SourceTrack) -> anyhow::Result<Vec<String>> {

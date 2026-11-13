@@ -110,7 +110,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let rec = recording(dir.path());
         let r = candidate("m1", "Album", "Band", &[("One", 35_000), ("Two", 40_000)]);
-        let fake = VinylFake { releases: vec![r], fingerprint_ids: vec!["m1".into()], offline: false };
+        let fake = VinylFake { releases: vec![r], fingerprint_ids: vec!["m1".into()], offline: false, no_results_for: None };
         assert_eq!(identify(&rec, &fake).unwrap().iter().map(|c| c.mbid.as_str()).collect::<Vec<_>>(), ["m1"]);
     }
 
@@ -118,7 +118,7 @@ mod tests {
     fn being_offline_is_an_error_not_no_match() {
         let dir = tempfile::tempdir().unwrap();
         let rec = recording(dir.path());
-        let fake = VinylFake { releases: vec![], fingerprint_ids: vec![], offline: true };
+        let fake = VinylFake { releases: vec![], fingerprint_ids: vec![], offline: true, no_results_for: None };
         assert!(identify(&rec, &fake).is_err());
     }
 

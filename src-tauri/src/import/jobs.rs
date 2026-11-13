@@ -391,25 +391,27 @@ impl Worker {
                             candidates.insert(0, r.clone());
                         }
                         job.plan = vinyl::plan(&job.rec, Some(&r), candidates, None);
+                        self.vinyl_review(job);
                     }
-                    Err(e) => job.plan.warning = Some(format!("Couldn't load that release ({e:#}).")),
+                    Err(e) => self.vinyl_review_with(job, Some(format!("Couldn't load that release ({e:#})."))),
                 }
-                self.vinyl_review(job);
             }
+            // The search's own message replaces any earlier one; the release's length warning stays.
             JobChoice::Search { query } => {
-                match self.source.search_text(&query) {
+                let message = match self.source.search_text(&query) {
                     Ok(ids) => {
                         let found: Vec<_> =
                             ids.iter().take(crate::identify::MAX_CANDIDATES).filter_map(|id| self.source.release(id).ok()).collect();
                         if found.is_empty() {
-                            job.plan.warning = Some("No releases found for that search.".into());
+                            Some("No releases found for that search.".to_string())
                         } else {
                             job.plan.candidates = found;
+                            None
                         }
                     }
-                    Err(e) => job.plan.warning = Some(format!("Search failed ({e:#}).")),
-                }
-                self.vinyl_review(job);
+                    Err(e) => Some(format!("Search failed ({e:#}).")),
+                };
+                self.vinyl_review_with(job, message);
             }
             JobChoice::VinylConfirm { tracks, matched } => self.confirm_vinyl(job, tracks, matched),
             // Choices for normal imports don't apply here: keep waiting.
@@ -1251,7 +1253,7 @@ mod tests {
 
     #[test]
     fn vinyl_match_is_reviewed_then_imported_as_flac() {
-        let fake = VinylFake { releases: vec![candidate("m1", "Album", "Band", &SIDE_TL)], fingerprint_ids: vec!["m1".into()], offline: false };
+        let fake = VinylFake { releases: vec![candidate("m1", "Album", "Band", &SIDE_TL)], fingerprint_ids: vec!["m1".into()], offline: false, no_results_for: None };
         let h = vinyl_harness(fake);
         h.queue.send(Command::ImportVinyl(vec![h.side.clone()]));
         let (job_id, plan) = review(&h.rx, true);
@@ -1269,7 +1271,7 @@ mod tests {
 
     #[test]
     fn vinyl_without_a_match_imports_needing_metadata() {
-        let h = vinyl_harness(VinylFake { releases: vec![], fingerprint_ids: vec![], offline: false });
+        let h = vinyl_harness(VinylFake { releases: vec![], fingerprint_ids: vec![], offline: false, no_results_for: None });
         h.queue.send(Command::ImportVinyl(vec![h.side.clone()]));
         let (job_id, plan) = review(&h.rx, true);
         assert!(plan.release.is_none());
@@ -1282,7 +1284,7 @@ mod tests {
 
     #[test]
     fn vinyl_offline_still_offers_the_gaps() {
-        let h = vinyl_harness(VinylFake { releases: vec![], fingerprint_ids: vec![], offline: true });
+        let h = vinyl_harness(VinylFake { releases: vec![], fingerprint_ids: vec![], offline: true, no_results_for: None });
         h.queue.send(Command::ImportVinyl(vec![h.side.clone()]));
         let (_, plan) = review(&h.rx, true);
         assert_eq!(plan.tracks.len(), 3);
@@ -1292,7 +1294,7 @@ mod tests {
     #[test]
     fn vinyl_change_release_replans() {
         let other = candidate("m2", "Album (Remaster)", "Band", &SIDE_TL);
-        let fake = VinylFake { releases: vec![candidate("m1", "Album", "Band", &SIDE_TL), other], fingerprint_ids: vec!["m1".into()], offline: false };
+        let fake = VinylFake { releases: vec![candidate("m1", "Album", "Band", &SIDE_TL), other], fingerprint_ids: vec!["m1".into()], offline: false, no_results_for: None };
         let h = vinyl_harness(fake);
         h.queue.send(Command::ImportVinyl(vec![h.side.clone()]));
         let (job_id, _) = review(&h.rx, true);
@@ -1303,7 +1305,7 @@ mod tests {
 
     #[test]
     fn vinyl_realign_after_no_match_clears_the_stale_note() {
-        let fake = VinylFake { releases: vec![candidate("m2", "Album", "Band", &SIDE_TL)], fingerprint_ids: vec![], offline: false };
+        let fake = VinylFake { releases: vec![candidate("m2", "Album", "Band", &SIDE_TL)], fingerprint_ids: vec![], offline: false, no_results_for: None };
         let h = vinyl_harness(fake);
         h.queue.send(Command::ImportVinyl(vec![h.side.clone()]));
         let (job_id, plan) = review(&h.rx, true);
@@ -1316,27 +1318,31 @@ mod tests {
 
     #[test]
     fn vinyl_empty_search_keeps_candidates_and_warns() {
-        let fake = VinylFake { releases: vec![candidate("m1", "Album", "Band", &SIDE_TL)], fingerprint_ids: vec!["m1".into()], offline: false };
+        // A release twice the recording's length: the review carries its length warning.
+        let long = candidate("m1", "Album", "Band", &[("One", 60_000), ("Two", 60_000), ("Three", 60_000)]);
+        let other = candidate("m2", "Album (Remaster)", "Band", &SIDE_TL);
+        let fake = VinylFake { releases: vec![long, other], fingerprint_ids: vec!["m1".into()], offline: false, no_results_for: Some("nothing") };
         let h = vinyl_harness(fake);
         h.queue.send(Command::ImportVinyl(vec![h.side.clone()]));
-        let (job_id, _) = review(&h.rx, true);
-        // Search returns every release the fake has; to get none, search a fake with no releases.
-        let h2 = vinyl_harness(VinylFake { releases: vec![], fingerprint_ids: vec![], offline: false });
-        h2.queue.send(Command::ImportVinyl(vec![h2.side.clone()]));
-        let (job2, _) = review(&h2.rx, true);
-        h2.queue.send(Command::Resolve { job_id: job2, choice: JobChoice::Search { query: "nothing".into() } });
-        let (_, plan) = review(&h2.rx, false);
-        assert_eq!(plan.warning.as_deref(), Some("No releases found for that search."));
-        // A search that does find releases still replaces the list and sets no warning.
+        let (job_id, first) = review(&h.rx, true);
+        let fit = first.warning.clone().expect("length warning");
+        assert!(fit.contains("different edition"), "{fit}");
+        // An empty search keeps the candidates and adds its message without losing the length warning.
+        h.queue.send(Command::Resolve { job_id, choice: JobChoice::Search { query: "nothing".into() } });
+        let (_, plan) = review(&h.rx, false);
+        assert_eq!(plan.candidates, first.candidates);
+        let w = plan.warning.unwrap();
+        assert!(w.contains("No releases found for that search.") && w.contains(&fit), "{w}");
+        // A search that finds releases replaces the list and clears the message; the length warning stays.
         h.queue.send(Command::Resolve { job_id, choice: JobChoice::Search { query: "album".into() } });
         let (_, plan) = review(&h.rx, false);
-        assert_eq!(plan.candidates.len(), 1);
-        assert!(plan.warning.is_none());
+        assert_eq!(plan.candidates.len(), 2);
+        assert_eq!(plan.warning.as_deref(), Some(fit.as_str()));
     }
 
     #[test]
     fn vinyl_confirm_with_the_wrong_piece_count_returns_to_the_review() {
-        let fake = VinylFake { releases: vec![candidate("m1", "Album", "Band", &SIDE_TL)], fingerprint_ids: vec!["m1".into()], offline: false };
+        let fake = VinylFake { releases: vec![candidate("m1", "Album", "Band", &SIDE_TL)], fingerprint_ids: vec!["m1".into()], offline: false, no_results_for: None };
         let h = vinyl_harness(fake);
         h.queue.send(Command::ImportVinyl(vec![h.side.clone()]));
         let (job_id, first) = review(&h.rx, true);
@@ -1354,7 +1360,7 @@ mod tests {
 
     #[test]
     fn vinyl_sides_that_differ_fail() {
-        let h = vinyl_harness(VinylFake { releases: vec![], fingerprint_ids: vec![], offline: false });
+        let h = vinyl_harness(VinylFake { releases: vec![], fingerprint_ids: vec![], offline: false, no_results_for: None });
         let b = h.dir.path().join("Side B.wav");
         write_pattern_wav(&b, 16000, 1, 16, &[tone(5.0, 0.2)]);
         h.queue.send(Command::ImportVinyl(vec![h.side.clone(), b]));
