@@ -26,7 +26,9 @@ fn audio_range(index: &Index, span: &Range<usize>) -> (u64, u64) {
     (first.offset, last.offset + last.len as u64 - first.offset)
 }
 
-/// The header frame's 4 header bytes, bitrate index, tag position and length.
+/// The header frame's 4 header bytes, bitrate index, tag position and length. It keeps the source's
+/// first-frame bitrate when that frame size holds the Xing data, so a player that estimates a CBR
+/// length from the first frame gets it right; otherwise it takes the lowest bitrate that fits.
 fn xing_layout(index: &Index) -> Result<([u8; 4], u8, usize, usize)> {
     let mut h = index.first_header;
     h[1] |= 0x01; // no CRC
@@ -34,8 +36,10 @@ fn xing_layout(index: &Index) -> Result<([u8; 4], u8, usize, usize)> {
     let parsed = header::parse(h).context("the first MP3 frame header is not valid")?;
     let tag = 4 + parsed.side_info_len();
     let needed = (tag + 16) as u32;
-    let b = (1..=14u8)
-        .find(|&b| layer3_frame_len(parsed.version, b, parsed.sample_rate, false) >= needed)
+    let fits = |b: u8| layer3_frame_len(parsed.version, b, parsed.sample_rate, false) >= needed;
+    let b = Some(parsed.bitrate_index)
+        .filter(|&b| (1..=14).contains(&b) && fits(b))
+        .or_else(|| (1..=14u8).find(|&b| fits(b)))
         .context("no MP3 bitrate is large enough for a header frame")?;
     h[2] = (h[2] & 0x0F) | (b << 4);
     let len = layer3_frame_len(parsed.version, b, parsed.sample_rate, false) as usize;
@@ -211,6 +215,17 @@ mod tests {
         let out = dir.path().join("cut.mp3");
         assert!(write_cut(&info.path, &ix, 5..5, &out).is_err());
         assert!(!out.exists());
+    }
+
+    #[test]
+    fn info_frame_keeps_the_source_bitrate() {
+        let (info, ix) = probed("cbr.mp3");
+        assert_eq!(ix.first_header[2] >> 4, 9);
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("cut.mp3");
+        write_cut(&info.path, &ix, 10..20, &out).unwrap();
+        let bytes = std::fs::read(&out).unwrap();
+        assert_eq!(header::parse(bytes[..4].try_into().unwrap()).unwrap().bitrate_index, 9);
     }
 
     #[test]

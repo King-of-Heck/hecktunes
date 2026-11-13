@@ -100,7 +100,7 @@ impl ImportQueue {
         Self::start_with_tmp(lib, source, std::env::temp_dir().join("hecktunes-vinyl"), notify)
     }
 
-    /// `vinyl_tmp` holds the FLACs vinyl imports write before they are copied into the library.
+    /// `vinyl_tmp` holds the tracks vinyl imports write before they are copied into the library.
     pub fn start_with_tmp(
         lib: Arc<Mutex<Library>>,
         source: Arc<dyn MetadataSource>,
@@ -137,7 +137,7 @@ impl ImportQueue {
     }
 }
 
-/// A folder deleted when dropped: the FLACs a vinyl import wrote, kept until its job is done with them.
+/// A folder deleted when dropped: the tracks a vinyl import wrote, kept until its job is done with them.
 struct TempFolder(PathBuf);
 
 impl Drop for TempFolder {
@@ -165,7 +165,7 @@ struct Job {
     candidates: Vec<ReleaseCandidate>,
     /// Release waiting on a Duplicate decision.
     chosen: Option<ReleaseCandidate>,
-    /// Vinyl imports: the temporary FLACs, deleted when the job ends.
+    /// Vinyl imports: the temporary tracks, deleted when the job ends.
     _temp: Option<TempFolder>,
 }
 
@@ -317,7 +317,7 @@ impl Worker {
         // Copy and tag without the library lock; take it only for the DB transaction.
         let result = stage(&self.root, &job.group, None, cover, needs_metadata)
             .and_then(|staged| staged.commit(&mut self.lib.lock().unwrap()));
-        // Free a vinyl import's temporary FLACs before reporting, so the report is the last word.
+        // Free a vinyl import's temporary tracks before reporting, so the report is the last word.
         let (id, label) = (job.id, job.label.clone());
         drop(job);
         match result {
@@ -347,7 +347,7 @@ impl Worker {
             }
         }
         drop(lib);
-        // Free a vinyl import's temporary FLACs before reporting, so the report is the last word.
+        // Free a vinyl import's temporary tracks before reporting, so the report is the last word.
         let (id, label) = (job.id, job.label.clone());
         drop(job);
         match result {
@@ -1300,6 +1300,8 @@ mod tests {
         let tracks = lib.album_tracks(album.id).unwrap();
         assert_eq!(tracks.iter().map(|t| t.title.as_str()).collect::<Vec<_>>(), ["One", "Two", "Three"]);
         assert!(tracks.iter().all(|t| t.format == "mp3"), "{:?}", tracks.iter().map(|t| &t.format).collect::<Vec<_>>());
+        let read = crate::tags::read_source_track(&tracks[0].file_path).unwrap();
+        assert_eq!(read.title.as_deref(), Some("One"), "tag read back from {:?}", tracks[0].file_path);
         assert!(!h.dir.path().join("tmp").join(format!("job-{job_id}")).exists(), "temporary files removed");
     }
 

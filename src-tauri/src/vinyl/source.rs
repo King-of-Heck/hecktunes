@@ -67,7 +67,7 @@ impl SourceInfo {
     /// e.g. "44.1 kHz, 16-bit, stereo" for a WAV, "MP3, 44.1 kHz, stereo" for an MP3.
     pub fn describe(&self) -> String {
         let khz = self.sample_rate as f64 / 1000.0;
-        let rate = if khz.fract() == 0.0 { format!("{khz:.0}") } else { format!("{khz:.2}").trim_end_matches('0').to_string() };
+        let rate = format!("{khz:.3}").trim_end_matches('0').trim_end_matches('.').to_string();
         let layout = if self.channels == 1 { "mono" } else { "stereo" };
         match self.format {
             Format::Wav { float: true } => format!("{rate} kHz, 32-bit float, {layout}"),
@@ -336,5 +336,14 @@ mod tests {
         assert!(!a.same_format(&b));
         assert!(a.same_format(&a.clone()));
         assert_eq!(a.describe(), "44.1 kHz, 16-bit, stereo");
+        assert_eq!(b.describe(), "48 kHz, 16-bit, stereo");
+    }
+
+    #[test]
+    fn describe_keeps_three_decimals_of_khz() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("low.wav");
+        write_pattern_wav(&p, 11025, 1, 16, &[tone(0.1, 0.5)]);
+        assert_eq!(probe(&p).unwrap().describe(), "11.025 kHz, 16-bit, mono");
     }
 }

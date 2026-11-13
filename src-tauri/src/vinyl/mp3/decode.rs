@@ -158,6 +158,58 @@ mod tests {
         }
     }
 
+    /// The first `n` interleaved samples symphonia's own reader and decoder give, with gapless
+    /// trimming on (`AudioDecoderOptions::gapless`, the default in 0.6.1).
+    fn symphonia_gapless(path: &std::path::Path, n: usize) -> Vec<i32> {
+        use symphonia::core::codecs::audio::AudioDecoderOptions;
+        use symphonia::core::errors::Error as SymError;
+        use symphonia::core::formats::probe::Hint;
+        use symphonia::core::formats::{FormatOptions, TrackType};
+        use symphonia::core::io::MediaSourceStream;
+        use symphonia::core::meta::MetadataOptions;
+        let mss = MediaSourceStream::new(Box::new(std::fs::File::open(path).unwrap()), Default::default());
+        let mut hint = Hint::new();
+        hint.with_extension("mp3");
+        let mut format = symphonia::default::get_probe()
+            .probe(&hint, mss, FormatOptions::default(), MetadataOptions::default())
+            .unwrap();
+        let track = format.default_track(TrackType::Audio).unwrap();
+        let id = track.id;
+        let params = track.codec_params.as_ref().and_then(|p| p.audio()).unwrap().clone();
+        let opts = AudioDecoderOptions::default().gapless(true);
+        let mut decoder = symphonia::default::get_codecs().make_audio_decoder(&params, &opts).unwrap();
+        let (mut out, mut buf) = (Vec::new(), Vec::<i16>::new());
+        while out.len() < n {
+            let Some(packet) = format.next_packet().unwrap() else { break };
+            if packet.track_id != id {
+                continue;
+            }
+            match decoder.decode(&packet) {
+                Ok(b) => {
+                    buf.resize(b.samples_interleaved(), 0);
+                    b.copy_to_slice_interleaved(&mut buf);
+                    out.extend(buf.iter().map(|&s| s as i32));
+                }
+                Err(SymError::DecodeError(_)) => continue,
+                Err(e) => panic!("{e}"),
+            }
+        }
+        out.truncate(n);
+        out
+    }
+
+    #[test]
+    fn reads_line_up_with_symphonia_gapless_decoding() {
+        for name in ["cbr.mp3", "mono22k.mp3"] {
+            let info = probe(&fixture(name)).unwrap();
+            let ch = info.channels as usize;
+            let want = symphonia_gapless(&info.path, 50_000);
+            assert_eq!(want.len(), 50_000, "{name}");
+            let got = read_range(&info, 0, (50_000 / ch) as u64).unwrap();
+            assert!(got == want, "{name}: differs from symphonia's gapless output");
+        }
+    }
+
     #[test]
     fn reads_in_small_chunks() {
         let info = probe(&fixture("cbr.mp3")).unwrap();
