@@ -67,6 +67,9 @@ pub fn probe(path: &Path) -> Result<WavInfo> {
         (hound::SampleFormat::Float, 32) => true,
         (_, bits) => bail!("{} is {bits}-bit; use a 16-bit, 24-bit or 32-bit float WAV", file_name(path)),
     };
+    if s.sample_rate == 0 {
+        bail!("{} says its sample rate is 0 Hz; the file is damaged", file_name(path));
+    }
     if !(1..=2).contains(&s.channels) {
         bail!("{} has {} channels; only mono or stereo recordings are supported", file_name(path), s.channels);
     }
@@ -157,6 +160,18 @@ mod tests {
         let junk = dir.path().join("junk.wav");
         std::fs::write(&junk, b"not a wav").unwrap();
         assert!(probe(&junk).is_err());
+    }
+
+    #[test]
+    fn probe_rejects_a_zero_sample_rate() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("zero.wav");
+        write_pattern_wav(&p, 8000, 1, 16, &[tone(0.1, 0.5)]);
+        let mut bytes = std::fs::read(&p).unwrap();
+        bytes[24..32].copy_from_slice(&[0; 8]); // fmt chunk: sample rate and byte rate
+        std::fs::write(&p, bytes).unwrap();
+        let e = format!("{:#}", probe(&p).unwrap_err());
+        assert!(e.contains("zero.wav") && e.contains("sample rate"), "{e}");
     }
 
     #[test]
