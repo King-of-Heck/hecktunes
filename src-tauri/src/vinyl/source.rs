@@ -1,5 +1,6 @@
 //! One interface over the recording formats: probing and reading frame ranges.
 
+use super::mp3::cut;
 use super::mp3::decode::Mp3Reader;
 use super::mp3::index::{self, Index};
 use super::wav;
@@ -8,6 +9,9 @@ use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+
+/// FLAC is assumed to need at most this fraction of the WAV's size.
+const FLAC_SIZE_RATIO: f64 = 0.7;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Format {
@@ -70,14 +74,29 @@ impl SourceInfo {
         }
     }
 
-    /// Bytes of WAV audio per second. For an MP3 this is the rate of the 16-bit PCM it decodes
-    /// to, not of the file; only meaningful for WAVs.
-    pub fn byte_rate(&self) -> u64 {
+    /// Bytes of WAV audio per second; only meaningful for WAVs.
+    fn byte_rate(&self) -> u64 {
         let bytes = match self.format {
             Format::Wav { float: true } => 4,
             Format::Wav { float: false } | Format::Mp3(_) => self.bits as u64 / 8,
         };
         self.sample_rate as u64 * self.channels as u64 * bytes
+    }
+
+    /// Bytes a track [start_ms, end_ms) will take: 0.7 x PCM for WAV (FLAC), the cut file for MP3.
+    pub fn track_bytes(&self, start_ms: u64, end_ms: u64) -> u64 {
+        match &self.format {
+            Format::Wav { .. } => ((end_ms.saturating_sub(start_ms) * self.byte_rate() / 1000) as f64 * FLAC_SIZE_RATIO) as u64,
+            Format::Mp3(ix) => cut::cut_bytes(ix, cut::frame_span(ix, self.ms_to_frame(start_ms), self.ms_to_frame(end_ms))),
+        }
+    }
+
+    /// File extension the track is written with: "flac" or "mp3".
+    pub fn track_extension(&self) -> &'static str {
+        match self.format {
+            Format::Wav { .. } => "flac",
+            Format::Mp3(_) => "mp3",
+        }
     }
 }
 

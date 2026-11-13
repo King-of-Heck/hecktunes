@@ -25,8 +25,6 @@ use source::SourceInfo;
 pub const FLIP_MIN_FRAMES: usize = 100;
 /// A release fits when its length is within this fraction of the recording's music.
 pub const FIT_TOLERANCE: f64 = 0.05;
-/// FLAC is assumed to need at most this fraction of the WAV's size.
-const FLAC_SIZE_RATIO: f64 = 0.7;
 
 pub struct FileAnalysis {
     pub info: SourceInfo,
@@ -304,19 +302,16 @@ fn gb(bytes: u64) -> String {
     format!("{:.1} GB", bytes as f64 / 1e9)
 }
 
-/// Why the FLACs of `tracks` won't fit on the drive holding `dir`, if they won't. Writes nothing
+/// Why the files of `tracks` won't fit on the drive holding `dir`, if they won't. Writes nothing
 /// (the free space is measured at the nearest existing folder).
 pub fn space_problem(rec: &Recording, tracks: &[PlanTrack], dir: &Path) -> Option<String> {
-    let need: u64 = tracks
-        .iter()
-        .map(|t| (t.end_ms.saturating_sub(t.start_ms) * rec.files[t.file].info.byte_rate() / 1000) as f64 * FLAC_SIZE_RATIO)
-        .sum::<f64>() as u64;
+    let need: u64 = tracks.iter().map(|t| rec.files[t.file].info.track_bytes(t.start_ms, t.end_ms)).sum();
     let existing = dir.ancestors().find(|d| d.exists())?;
     let free = available_space(existing)?;
     (free < need).then(|| format!("Not enough free space: the tracks need about {} but only {} is free.", gb(need), gb(free)))
 }
 
-/// Encodes each track into `dir` (`01.flac`, `02.flac`...) and returns them as an album to import.
+/// Writes each track into `dir` (`01.flac`... for WAV, `01.mp3`... for MP3) and returns them as an album to import.
 pub fn write_tracks(rec: &Recording, tracks: &[PlanTrack], dir: &Path) -> Result<AlbumGroup> {
     if let Some(problem) = space_problem(rec, tracks, dir) {
         bail!(problem);
@@ -325,8 +320,12 @@ pub fn write_tracks(rec: &Recording, tracks: &[PlanTrack], dir: &Path) -> Result
     let mut out = Vec::with_capacity(tracks.len());
     for (i, t) in tracks.iter().enumerate() {
         let info = &rec.files[t.file].info;
-        let path = dir.join(format!("{:02}.flac", i + 1));
-        encode::encode_range(info, info.ms_to_frame(t.start_ms), info.ms_to_frame(t.end_ms), &path)?;
+        let path = dir.join(format!("{:02}.{}", i + 1, info.track_extension()));
+        let (start, end) = (info.ms_to_frame(t.start_ms), info.ms_to_frame(t.end_ms));
+        match &info.format {
+            source::Format::Wav { .. } => encode::encode_range(info, start, end, &path)?,
+            source::Format::Mp3(ix) => mp3::cut::write_cut(&info.path, ix, mp3::cut::frame_span(ix, start, end), &path)?,
+        }
         out.push(SourceTrack {
             path,
             title: Some(t.title.clone()),
@@ -544,6 +543,22 @@ mod tests {
         let out = dir.path().join("tmp").join("job-1");
         assert_eq!(space_problem(&rec, &p.tracks, &out), None);
         assert!(!out.exists());
+    }
+
+    #[test]
+    fn write_tracks_cuts_mp3s() {
+        let rec = load(&[fixture("cbr.mp3")]).unwrap();
+        let p = plan(&rec, None, vec![], None);
+        assert_eq!(p.tracks.len(), 3, "{:?}", p.tracks);
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("out");
+        assert_eq!(space_problem(&rec, &p.tracks, &out), None);
+        let group = write_tracks(&rec, &p.tracks, &out).unwrap();
+        let names: Vec<_> = group.tracks.iter().map(|t| t.path.file_name().unwrap().to_string_lossy().into_owned()).collect();
+        assert_eq!(names, ["01.mp3", "02.mp3", "03.mp3"]);
+        for t in &group.tracks {
+            assert!(mp3::index::scan(&t.path).unwrap().frames.len() > 100);
+        }
     }
 
     #[test]

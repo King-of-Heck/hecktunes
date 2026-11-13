@@ -1226,9 +1226,17 @@ mod tests {
     }
 
     fn vinyl_harness(source: impl MetadataSource + 'static) -> VinylHarness {
+        vinyl_harness_with(source, |dir| {
+            let side = dir.join("Side A.wav");
+            write_pattern_wav(&side, 8000, 1, 16, &[hiss(3.0), tone(30.0, 0.2), hiss(2.0), tone(40.0, 0.2), hiss(2.5), tone(20.0, 0.2), hiss(4.0)]);
+            side
+        })
+    }
+
+    /// `make_side` creates the recording in the harness's folder and returns its path.
+    fn vinyl_harness_with(source: impl MetadataSource + 'static, make_side: impl FnOnce(&std::path::Path) -> PathBuf) -> VinylHarness {
         let dir = tempfile::tempdir().unwrap();
-        let side = dir.path().join("Side A.wav");
-        write_pattern_wav(&side, 8000, 1, 16, &[hiss(3.0), tone(30.0, 0.2), hiss(2.0), tone(40.0, 0.2), hiss(2.5), tone(20.0, 0.2), hiss(4.0)]);
+        let side = make_side(dir.path());
         let lib = Arc::new(Mutex::new(Library::open_in_memory(dir.path().join("lib")).unwrap()));
         let (tx, rx) = channel();
         let queue = ImportQueue::start_with_tmp(lib.clone(), Arc::new(source), dir.path().join("tmp"), move |u| {
@@ -1267,6 +1275,32 @@ mod tests {
         assert_eq!(tracks.iter().map(|t| t.title.as_str()).collect::<Vec<_>>(), ["One", "Two", "Three"]);
         assert!(tracks.iter().all(|t| t.format == "flac"));
         assert!(!h.dir.path().join("tmp").join(format!("job-{job_id}")).exists(), "temporary FLACs removed");
+    }
+
+    #[test]
+    fn vinyl_mp3_is_imported_as_mp3() {
+        let release = candidate("m1", "Album", "Band", &[("One", 7_000), ("Two", 7_000), ("Three", 5_000)]);
+        let fake = VinylFake { releases: vec![release], fingerprint_ids: vec!["m1".into()], offline: false, no_results_for: None };
+        let h = vinyl_harness_with(fake, |dir| {
+            let side = dir.join("Side A.mp3");
+            std::fs::copy(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/vinyl/cbr.mp3"), &side).unwrap();
+            side
+        });
+        h.queue.send(Command::ImportVinyl(vec![h.side.clone()]));
+        // The fixture's pieces are shorter than the fingerprinting minimum, so pick the release.
+        let (job_id, _) = review(&h.rx, true);
+        h.queue.send(Command::Resolve { job_id, choice: JobChoice::VinylRealign { mbid: "m1".into() } });
+        let (_, plan) = review(&h.rx, false);
+        assert_eq!(plan.release.as_ref().map(|r| r.mbid.as_str()), Some("m1"));
+        h.queue.send(Command::Resolve { job_id, choice: JobChoice::VinylConfirm { tracks: plan.tracks, matched: true } });
+        let ups = until(&h.rx, is_terminal);
+        assert!(matches!(ups.last().unwrap().state, JobState::Done { matched: true, .. }), "{:?}", ups.last());
+        let lib = h.lib.lock().unwrap();
+        let album = lib.list_albums().unwrap().remove(0);
+        let tracks = lib.album_tracks(album.id).unwrap();
+        assert_eq!(tracks.iter().map(|t| t.title.as_str()).collect::<Vec<_>>(), ["One", "Two", "Three"]);
+        assert!(tracks.iter().all(|t| t.format == "mp3"), "{:?}", tracks.iter().map(|t| &t.format).collect::<Vec<_>>());
+        assert!(!h.dir.path().join("tmp").join(format!("job-{job_id}")).exists(), "temporary files removed");
     }
 
     #[test]

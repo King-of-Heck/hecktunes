@@ -2,3 +2,4 @@
 pub mod header;
 pub mod index;
 pub mod decode;
+pub mod cut;
