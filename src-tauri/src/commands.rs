@@ -21,6 +21,8 @@ pub struct AppState {
     pub library_available: bool,
     /// Temporary FLACs of vinyl imports and the Listen clip.
     pub vinyl_tmp: PathBuf,
+    /// Held for a whole `vinyl_preview`, so two quick Listen clicks don't both rewrite the clip.
+    pub preview_lock: Mutex<()>,
 }
 
 pub struct SettingsState {
@@ -108,16 +110,27 @@ pub fn import_vinyl(state: State<AppState>, paths: Vec<String>) -> CmdResult<()>
 /// Half the length of the Listen clip around a cut.
 const PREVIEW_HALF_MS: u64 = 3000;
 
+/// The clip `[from, to)` in ms played to check a cut at `at_ms`: up to 3 s either side, inside the
+/// recording, never empty. None when the recording has no length.
+fn preview_window(at_ms: u64, duration_ms: u64) -> Option<(u64, u64)> {
+    if duration_ms == 0 {
+        return None;
+    }
+    let at = at_ms.min(duration_ms);
+    Some((at.saturating_sub(PREVIEW_HALF_MS), (at + PREVIEW_HALF_MS).min(duration_ms)))
+}
+
 /// Plays the 6 s around `at_ms` of a vinyl recording, so a cut can be checked by ear.
 #[tauri::command(async)]
 pub fn vinyl_preview(state: State<AppState>, path: String, at_ms: u64) -> CmdResult<()> {
+    // One Listen at a time: a second click must not rewrite the clip while the first writes or plays it.
+    let _one_at_a_time = state.preview_lock.lock().unwrap_or_else(|p| p.into_inner());
+    let info = crate::vinyl::wav::probe(std::path::Path::new(&path)).map_err(|e| format!("{e:#}"))?;
+    let (from, to) = preview_window(at_ms, info.duration_ms()).ok_or("That recording has no audio to play.")?;
     // The player may be holding the previous clip open; it must let go before it is rewritten.
     if !state.player.stop_and_wait(PLAYER_STOP_TIMEOUT) {
         return Err("The player is busy. Try again in a moment.".into());
     }
-    let info = crate::vinyl::wav::probe(std::path::Path::new(&path)).map_err(|e| format!("{e:#}"))?;
-    let from = at_ms.saturating_sub(PREVIEW_HALF_MS);
-    let to = (at_ms + PREVIEW_HALF_MS).min(info.duration_ms());
     std::fs::create_dir_all(&state.vinyl_tmp).map_err(err)?;
     let clip = state.vinyl_tmp.join("preview.flac");
     crate::vinyl::encode::encode_range(&info, info.ms_to_frame(from), info.ms_to_frame(to), &clip).map_err(|e| format!("{e:#}"))?;
@@ -366,6 +379,17 @@ mod guard_tests {
             library_usable(false, std::path::Path::new("E:/Tunes")).unwrap_err(),
             "Your library folder E:/Tunes isn't available (is the drive connected?) Connect it and restart HeckTunes."
         );
+    }
+
+    #[test]
+    fn the_listen_window_stays_inside_the_recording() {
+        assert_eq!(preview_window(10_000, 60_000), Some((7_000, 13_000)));
+        assert_eq!(preview_window(1_000, 60_000), Some((0, 4_000)));
+        assert_eq!(preview_window(59_000, 60_000), Some((56_000, 60_000)));
+        // A cut at or past the end (e.g. the last track's end) still plays the last 3 s.
+        assert_eq!(preview_window(60_000, 60_000), Some((57_000, 60_000)));
+        assert_eq!(preview_window(99_000, 60_000), Some((57_000, 60_000)));
+        assert_eq!(preview_window(0, 0), None);
     }
 
     #[test]

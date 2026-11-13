@@ -89,7 +89,7 @@ pub fn run() {
                 },
             );
             let settings = commands::SettingsState { config_dir, default_root, active_root, startup, in_effect, key_active };
-            app.manage(AppState { lib, queue, sync, player, settings, library_available: choice.available, vinyl_tmp });
+            app.manage(AppState { lib, queue, sync, player, settings, library_available: choice.available, vinyl_tmp, preview_lock: Default::default() });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
