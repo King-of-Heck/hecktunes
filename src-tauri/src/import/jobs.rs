@@ -417,13 +417,26 @@ impl Worker {
         }
     }
 
-    fn confirm_vinyl(&mut self, job: VinylJob, tracks: Vec<PlanTrack>, matched: bool) {
+    /// Shows the review again with `message` above the release's own warning.
+    fn vinyl_review_with(&mut self, mut job: VinylJob, message: Option<String>) {
+        job.plan.warning = vinyl::warning(&job.rec, job.plan.release.as_ref(), message);
+        self.vinyl_review(job);
+    }
+
+    fn confirm_vinyl(&mut self, mut job: VinylJob, tracks: Vec<PlanTrack>, matched: bool) {
         let release = if matched { job.plan.release.clone() } else { None };
-        if let Err(e) = vinyl::check_tracks(&job.rec, &tracks, release.as_ref()) {
-            return self.emit(job.id, &job.label, JobState::Failed { error: format!("{e:#}") });
+        let job_dir = self.vinyl_tmp.join(format!("job-{}", job.id));
+        // Refused before anything is written: back to the review with the user's cuts kept.
+        let refused = vinyl::check_tracks(&job.rec, &tracks, release.as_ref())
+            .err()
+            .map(|e| format!("{e:#}"))
+            .or_else(|| vinyl::space_problem(&job.rec, &tracks, &job_dir));
+        if let Some(problem) = refused {
+            job.plan.tracks = tracks;
+            return self.vinyl_review_with(job, Some(problem));
         }
         self.emit(job.id, &job.label, JobState::Importing);
-        let dir = TempFolder(self.vinyl_tmp.join(format!("job-{}", job.id)));
+        let dir = TempFolder(job_dir);
         let group = match vinyl::write_tracks(&job.rec, &tracks, &dir.0) {
             Ok(g) => g,
             Err(e) => return self.emit(job.id, &job.label, JobState::Failed { error: format!("{e:#}") }),
@@ -1322,16 +1335,21 @@ mod tests {
     }
 
     #[test]
-    fn vinyl_confirm_with_the_wrong_piece_count_fails() {
+    fn vinyl_confirm_with_the_wrong_piece_count_returns_to_the_review() {
         let fake = VinylFake { releases: vec![candidate("m1", "Album", "Band", &SIDE_TL)], fingerprint_ids: vec!["m1".into()], offline: false };
         let h = vinyl_harness(fake);
         h.queue.send(Command::ImportVinyl(vec![h.side.clone()]));
-        let (job_id, plan) = review(&h.rx, true);
-        h.queue.send(Command::Resolve { job_id, choice: JobChoice::VinylConfirm { tracks: plan.tracks[..2].to_vec(), matched: true } });
-        match &until(&h.rx, is_terminal).last().unwrap().state {
-            JobState::Failed { error } => assert!(error.contains("pieces"), "{error}"),
-            other => panic!("{other:?}"),
-        }
+        let (job_id, first) = review(&h.rx, true);
+        let edited = first.tracks[..2].to_vec();
+        h.queue.send(Command::Resolve { job_id, choice: JobChoice::VinylConfirm { tracks: edited.clone(), matched: true } });
+        // The review comes back with the user's own cuts and the reason; nothing is lost.
+        let (again, plan) = review(&h.rx, false);
+        assert_eq!(again, job_id);
+        assert_eq!(plan.tracks, edited);
+        assert!(plan.warning.as_deref().is_some_and(|w| w.contains("pieces")), "{:?}", plan.warning);
+        // ...and the job can still be confirmed.
+        h.queue.send(Command::Resolve { job_id, choice: JobChoice::VinylConfirm { tracks: first.tracks, matched: true } });
+        assert!(matches!(until(&h.rx, is_terminal).last().unwrap().state, JobState::Done { matched: true, .. }));
     }
 
     #[test]

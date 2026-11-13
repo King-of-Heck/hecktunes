@@ -145,16 +145,27 @@ fn fit_warning(music_ms: u64, r: &ReleaseCandidate) -> Option<String> {
     })
 }
 
+/// The review screen's warning: `message` (something that just went wrong, e.g. a failed search or
+/// a refused import) followed by the release's length warning, which stays until the release changes.
+pub fn warning(rec: &Recording, release: Option<&ReleaseCandidate>, message: Option<String>) -> Option<String> {
+    let fit = release.filter(|r| !r.tracks.is_empty()).and_then(|r| fit_warning(rec.music_ms(), r));
+    match (message, fit) {
+        (Some(m), Some(f)) => Some(format!("{m}\n{f}")),
+        (m, f) => m.or(f),
+    }
+}
+
 pub fn plan(rec: &Recording, release: Option<&ReleaseCandidate>, candidates: Vec<ReleaseCandidate>, note: Option<String>) -> VinylPlan {
     let files = rec
         .files
         .iter()
         .map(|f| PlanFile { path: f.info.path.clone(), name: file_name(&f.info.path), duration_ms: f.info.duration_ms() })
         .collect();
-    let (mut tracks, warning) = match release {
-        Some(r) if !r.tracks.is_empty() => (release_tracks(rec, r), fit_warning(rec.music_ms(), r)),
-        _ => (gap_tracks(rec), None),
+    let mut tracks = match release {
+        Some(r) if !r.tracks.is_empty() => release_tracks(rec, r),
+        _ => gap_tracks(rec),
     };
+    let warning = warning(rec, release, None);
     // Envelope frames round the file's length up to 50 ms: keep every track inside its file.
     for t in &mut tracks {
         let dur = rec.files[t.file].info.duration_ms();
@@ -271,18 +282,24 @@ fn gb(bytes: u64) -> String {
     format!("{:.1} GB", bytes as f64 / 1e9)
 }
 
-/// Encodes each track into `dir` (`01.flac`, `02.flac`...) and returns them as an album to import.
-pub fn write_tracks(rec: &Recording, tracks: &[PlanTrack], dir: &Path) -> Result<AlbumGroup> {
-    std::fs::create_dir_all(dir)?;
+/// Why the FLACs of `tracks` won't fit on the drive holding `dir`, if they won't. Writes nothing
+/// (the free space is measured at the nearest existing folder).
+pub fn space_problem(rec: &Recording, tracks: &[PlanTrack], dir: &Path) -> Option<String> {
     let need: u64 = tracks
         .iter()
-        .map(|t| ((t.end_ms - t.start_ms) * rec.files[t.file].info.byte_rate() / 1000) as f64 * FLAC_SIZE_RATIO)
+        .map(|t| (t.end_ms.saturating_sub(t.start_ms) * rec.files[t.file].info.byte_rate() / 1000) as f64 * FLAC_SIZE_RATIO)
         .sum::<f64>() as u64;
-    if let Some(free) = available_space(dir) {
-        if free < need {
-            bail!("Not enough free space: the tracks need about {} but only {} is free.", gb(need), gb(free));
-        }
+    let existing = dir.ancestors().find(|d| d.exists())?;
+    let free = available_space(existing)?;
+    (free < need).then(|| format!("Not enough free space: the tracks need about {} but only {} is free.", gb(need), gb(free)))
+}
+
+/// Encodes each track into `dir` (`01.flac`, `02.flac`...) and returns them as an album to import.
+pub fn write_tracks(rec: &Recording, tracks: &[PlanTrack], dir: &Path) -> Result<AlbumGroup> {
+    if let Some(problem) = space_problem(rec, tracks, dir) {
+        bail!(problem);
     }
+    std::fs::create_dir_all(dir)?;
     let mut out = Vec::with_capacity(tracks.len());
     for (i, t) in tracks.iter().enumerate() {
         let info = &rec.files[t.file].info;
@@ -434,6 +451,16 @@ mod tests {
         let e = check_tracks(&rec, &p.tracks[..2], Some(&r)).unwrap_err().to_string();
         assert!(e.contains("2 pieces") && e.contains("3 tracks"), "{e}");
         assert!(check_tracks(&rec, &p.tracks[..2], None).is_ok());
+    }
+
+    #[test]
+    fn space_problem_writes_nothing_and_accepts_a_small_job() {
+        let dir = tempfile::tempdir().unwrap();
+        let rec = load(&[wav(dir.path(), "side.wav", 8000, &THREE)]).unwrap();
+        let p = plan(&rec, None, vec![], None);
+        let out = dir.path().join("tmp").join("job-1");
+        assert_eq!(space_problem(&rec, &p.tracks, &out), None);
+        assert!(!out.exists());
     }
 
     #[test]
