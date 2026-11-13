@@ -8,7 +8,18 @@ permissions:
   contents: write
 
 jobs:
+  # The installers take their version from the files, the release page from the tag; refuse to build if they differ.
+  check-version:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: node scripts/check-version.mjs "${{ github.ref_name }}"
+
   build:
+    needs: check-version
     strategy:
       fail-fast: false
       matrix:
@@ -58,9 +69,10 @@ jobs:
 
   # echo-sync is GPLv3 and ships inside the installers, so its source goes on the same release page.
   echo-sync-source:
-    needs: build
+    needs: [check-version, build]
     # Runs even if one matrix leg failed; the upload still fails loudly if no draft release exists.
-    if: always() && !cancelled()
+    # Skipped when the version check failed, since nothing was built.
+    if: always() && !cancelled() && needs.check-version.result == 'success'
     runs-on: ubuntu-latest
     env:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
