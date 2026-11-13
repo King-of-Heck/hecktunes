@@ -144,12 +144,38 @@ impl MetadataSource for OnlineSource {
     }
 
     fn cover(&self, mbid: &str) -> Result<Option<Vec<u8>>> {
-        let url = cover_url(mbid);
-        match net::with_retry(|| self.agent.get(&url).header("User-Agent", net::user_agent()).call(), std::thread::sleep) {
+        cover_with_fallback(
+            || self.image(&cover_url(mbid)),
+            || self.mb.release_group_id(mbid),
+            |rg| self.image(&release_group_cover_url(rg)),
+        )
+    }
+}
+
+impl OnlineSource {
+    /// A Cover Art Archive image, or `None` when it has none (404).
+    fn image(&self, url: &str) -> Result<Option<Vec<u8>>> {
+        match net::with_retry(|| self.agent.get(url).header("User-Agent", net::user_agent()).call(), std::thread::sleep) {
             Ok(mut resp) => Ok(Some(resp.body_mut().read_to_vec()?)),
             Err(ureq::Error::StatusCode(404)) => Ok(None),
             Err(e) => Err(e.into()),
         }
+    }
+}
+
+/// The release's own front cover; if it has none (common for less-documented editions), the
+/// front cover chosen for its release group, i.e. the same album in any edition.
+fn cover_with_fallback(
+    release_cover: impl FnOnce() -> Result<Option<Vec<u8>>>,
+    release_group_id: impl FnOnce() -> Result<Option<String>>,
+    group_cover: impl FnOnce(&str) -> Result<Option<Vec<u8>>>,
+) -> Result<Option<Vec<u8>>> {
+    if let Some(bytes) = release_cover()? {
+        return Ok(Some(bytes));
+    }
+    match release_group_id()? {
+        Some(rg) => group_cover(&rg),
+        None => Ok(None),
     }
 }
 
@@ -162,6 +188,10 @@ fn ascii(s: &str) -> String {
 /// full 600 px cover; it downscales anything larger.
 fn cover_url(mbid: &str) -> String {
     format!("https://coverartarchive.org/release/{mbid}/front-1200")
+}
+
+fn release_group_cover_url(release_group: &str) -> String {
+    format!("https://coverartarchive.org/release-group/{release_group}/front-1200")
 }
 
 #[cfg(test)]
@@ -373,6 +403,50 @@ mod tests {
     #[test]
     fn cover_url_asks_for_an_image_at_least_600_px() {
         assert_eq!(cover_url("abc"), "https://coverartarchive.org/release/abc/front-1200");
+        assert_eq!(release_group_cover_url("rg"), "https://coverartarchive.org/release-group/rg/front-1200");
+    }
+
+    /// Live: Bleed American (2001, XE) has no art of its own on the Cover Art Archive; its
+    /// release group does. Run with `cargo test -- --ignored live_cover`.
+    #[test]
+    #[ignore]
+    fn live_cover_falls_back_to_release_group() {
+        let bytes = OnlineSource::new(None).cover("2adfeecf-91e2-4821-ac14-d58aef312659").unwrap().expect("a cover");
+        assert!(crate::artwork::prepare_cover(&bytes).is_ok());
+    }
+
+    #[test]
+    fn a_release_without_art_falls_back_to_its_release_groups_cover() {
+        let asked = std::cell::RefCell::new(Vec::new());
+        let got = cover_with_fallback(
+            || Ok(None),
+            || Ok(Some("rg-1".to_string())),
+            |rg| {
+                asked.borrow_mut().push(rg.to_string());
+                Ok(Some(vec![1, 2, 3]))
+            },
+        )
+        .unwrap();
+        assert_eq!(got, Some(vec![1, 2, 3]));
+        assert_eq!(*asked.borrow(), vec!["rg-1".to_string()]);
+    }
+
+    #[test]
+    fn the_releases_own_cover_wins_and_no_group_lookup_happens() {
+        let got = cover_with_fallback(
+            || Ok(Some(vec![9])),
+            || panic!("must not look up the release group"),
+            |_| panic!("must not fetch the group cover"),
+        )
+        .unwrap();
+        assert_eq!(got, Some(vec![9]));
+    }
+
+    #[test]
+    fn no_art_anywhere_is_none_and_lookup_errors_are_reported() {
+        assert_eq!(cover_with_fallback(|| Ok(None), || Ok(None), |_| panic!("no group")).unwrap(), None);
+        assert_eq!(cover_with_fallback(|| Ok(None), || Ok(Some("rg".into())), |_| Ok(None)).unwrap(), None);
+        assert!(cover_with_fallback(|| Ok(None), || anyhow::bail!("offline"), |_| Ok(None)).is_err());
     }
 }
 

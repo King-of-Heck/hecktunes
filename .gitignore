@@ -25,3 +25,6 @@ dist-ssr
 src-tauri/target/
 src-tauri/binaries/
 src-tauri/licenses/echo-sync-LICENSE.txt
+
+# Local double-click shortcut (points at this machine's release build)
+HeckTunes.lnk

@@ -96,6 +96,11 @@ fn top_genre<'a>(genres: impl Iterator<Item = &'a Value>) -> Option<String> {
     counts.into_iter().max_by(|a, b| a.1.cmp(&b.1).then(b.0.cmp(&a.0))).map(|(n, _)| n)
 }
 
+/// The release group (the album across all its editions) a release belongs to.
+pub fn parse_release_group_id(v: &Value) -> Option<String> {
+    v["release-group"]["id"].as_str().map(str::to_string)
+}
+
 pub fn parse_release(v: &Value) -> Result<ReleaseCandidate> {
     let mbid = str_field(v, "id").ok_or_else(|| anyhow!("release without id"))?;
     let artist = join_credit(&v["artist-credit"]);
@@ -178,6 +183,11 @@ impl MusicBrainz {
         Ok(parse_search(&v))
     }
 
+    pub fn release_group_id(&self, mbid: &str) -> Result<Option<String>> {
+        let v = self.get_json(&format!("{BASE}/release/{mbid}"), &[("inc", "release-groups"), ("fmt", "json")])?;
+        Ok(parse_release_group_id(&v))
+    }
+
     pub fn release(&self, mbid: &str) -> Result<ReleaseCandidate> {
         let v = self.get_json(
             &format!("{BASE}/release/{mbid}"),
@@ -191,6 +201,13 @@ impl MusicBrainz {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn reads_the_release_group_id() {
+        let v = json!({ "id": "r1", "release-group": { "id": "a92d9f5f-60a3-3e7d-a0a3-e028c29e5ca5", "title": "Bleed American" } });
+        assert_eq!(parse_release_group_id(&v).as_deref(), Some("a92d9f5f-60a3-3e7d-a0a3-e028c29e5ca5"));
+        assert_eq!(parse_release_group_id(&json!({ "id": "r1" })), None);
+    }
 
     fn fixture(text: &str) -> Value {
         serde_json::from_str(text).unwrap()
