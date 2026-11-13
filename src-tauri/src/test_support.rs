@@ -234,7 +234,6 @@ pub const fn tone(secs: f32, level: f32) -> Part {
     Part { secs, level }
 }
 
-#[allow(dead_code)] // used by later tasks (vinyl splitting tests)
 pub const fn hiss(secs: f32) -> Part {
     Part { secs, level: 0.0 }
 }
