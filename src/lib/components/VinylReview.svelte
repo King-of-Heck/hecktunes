@@ -11,12 +11,19 @@
   let query = $state(job.label);
   let splitting = $state<{ index: number; at: number } | null>(null);
   let listenError = $state<string | null>(null);
+  let resolveError = $state<string | null>(null);
+  // The plan's track list as last loaded, so a reply that keeps it (e.g. a search) keeps the user's edits.
+  let lastPlanTracks = '';
 
-  // A new plan (after Change release or a search) arrives as a new `job` for the same id.
+  // A new plan (after Change release, a search or a refused import) arrives as a new `job` for the same id.
   $effect(() => {
-    tracks = job.plan.tracks.map((t) => ({ ...t }));
+    const planTracks = JSON.stringify(job.plan.tracks);
+    if (planTracks !== lastPlanTracks) {
+      lastPlanTracks = planTracks;
+      tracks = job.plan.tracks.map((t) => ({ ...t }));
+      splitting = null;
+    }
     busy = false;
-    splitting = null;
   });
 
   const release = $derived(job.plan.release);
@@ -26,10 +33,12 @@
 
   async function choose(choice: JobChoice) {
     busy = true;
+    resolveError = null;
     try {
       await resolveJob(job.job_id, choice);
     } catch (e) {
       console.error('resolve_job failed', e);
+      resolveError = String(e);
       busy = false;
     }
   }
@@ -41,6 +50,8 @@
 
   function edit(next: PlanTrack[]) {
     tracks = retitle(next, release);
+    // An open Split panel points at a row and time from before this edit.
+    splitting = null;
   }
 </script>
 
@@ -139,6 +150,7 @@
     </table>
 
     {#if listenError}<p class="warn">{listenError}</p>{/if}
+    {#if resolveError}<p class="warn">{resolveError}</p>{/if}
     {#if mismatch}<p class="warn">{mismatch}</p>{/if}
     {#if syncing}<p class="muted">Waiting for the Echo Mini sync to finish before changing your library.</p>{/if}
     <div class="footer">
@@ -170,7 +182,7 @@
   tr.split td, tr.end td { background: var(--bg); }
   .badge { margin-left: 6px; padding: 1px 6px; border-radius: 8px; background: var(--warn); color: #fff; font-size: 11px; }
   .muted { color: var(--muted); font-size: 12px; }
-  .warn { color: var(--warn); }
+  .warn { color: var(--warn); white-space: pre-line; }
   .link { border: none; background: none; color: var(--accent); padding: 0 4px; }
   .footer { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
 </style>
