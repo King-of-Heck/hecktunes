@@ -262,3 +262,21 @@ pub fn write_pattern_wav(path: &Path, rate: u32, channels: u16, bits: u16, parts
     }
     w.finalize().unwrap();
 }
+
+/// Envelope level used for vinyl hiss in synthetic envelopes.
+pub const HISS_DB: f32 = -65.0;
+
+/// A synthetic 50 ms envelope: `(seconds, dB)` stretches. Hiss-level stretches (<= -60 dB) wobble
+/// by +/-1.5 dB like real surface noise.
+pub fn db_frames(parts: &[(f32, f32)]) -> Vec<f32> {
+    let mut out = Vec::new();
+    let mut i: u32 = 0;
+    for &(secs, db) in parts {
+        for _ in 0..(secs * 20.0).round() as usize {
+            let wobble = if db <= -60.0 { ((i * 7919) % 31) as f32 / 10.0 - 1.5 } else { 0.0 };
+            out.push(db + wobble);
+            i += 1;
+        }
+    }
+    out
+}
