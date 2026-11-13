@@ -383,7 +383,6 @@ impl Worker {
         match choice {
             JobChoice::Skip => self.emit(job.id, &job.label, JobState::Skipped),
             JobChoice::VinylRealign { mbid } => {
-                self.emit(job.id, &job.label, JobState::Analysing);
                 let known = job.plan.candidates.iter().find(|c| c.mbid == mbid).cloned();
                 match known.map(Ok).unwrap_or_else(|| self.source.release(&mbid)) {
                     Ok(r) => {
@@ -391,7 +390,7 @@ impl Worker {
                         if !candidates.iter().any(|c| c.mbid == r.mbid) {
                             candidates.insert(0, r.clone());
                         }
-                        job.plan = vinyl::plan(&job.rec, Some(&r), candidates, job.plan.note.clone());
+                        job.plan = vinyl::plan(&job.rec, Some(&r), candidates, None);
                     }
                     Err(e) => job.plan.warning = Some(format!("Couldn't load that release ({e:#}).")),
                 }
@@ -400,8 +399,13 @@ impl Worker {
             JobChoice::Search { query } => {
                 match self.source.search_text(&query) {
                     Ok(ids) => {
-                        job.plan.candidates =
+                        let found: Vec<_> =
                             ids.iter().take(crate::identify::MAX_CANDIDATES).filter_map(|id| self.source.release(id).ok()).collect();
+                        if found.is_empty() {
+                            job.plan.warning = Some("No releases found for that search.".into());
+                        } else {
+                            job.plan.candidates = found;
+                        }
                     }
                     Err(e) => job.plan.warning = Some(format!("Search failed ({e:#}).")),
                 }
@@ -1220,10 +1224,12 @@ mod tests {
 
     const SIDE_TL: [(&str, u64); 3] = [("One", 30_000), ("Two", 40_000), ("Three", 20_000)];
 
-    fn review(rx: &Receiver<JobUpdate>) -> (u64, crate::vinyl::VinylPlan) {
+    /// Waits for the next vinyl review. `first` is true for a job's first review (which follows
+    /// the analysis); later reviews (realign, search) must not re-analyse.
+    fn review(rx: &Receiver<JobUpdate>, first: bool) -> (u64, crate::vinyl::VinylPlan) {
         let ups = until(rx, |s| matches!(s, JobState::NeedsVinylReview { .. }) || is_terminal(s));
         let last = ups.last().unwrap();
-        assert!(ups.iter().any(|u| matches!(u.state, JobState::Analysing)));
+        assert_eq!(ups.iter().any(|u| matches!(u.state, JobState::Analysing)), first, "{ups:?}");
         match &last.state {
             JobState::NeedsVinylReview { plan } => (last.job_id, plan.clone()),
             other => panic!("expected a vinyl review, got {other:?}"),
@@ -1235,7 +1241,7 @@ mod tests {
         let fake = VinylFake { releases: vec![candidate("m1", "Album", "Band", &SIDE_TL)], fingerprint_ids: vec!["m1".into()], offline: false };
         let h = vinyl_harness(fake);
         h.queue.send(Command::ImportVinyl(vec![h.side.clone()]));
-        let (job_id, plan) = review(&h.rx);
+        let (job_id, plan) = review(&h.rx, true);
         assert_eq!(plan.release.as_ref().map(|r| r.mbid.as_str()), Some("m1"));
         h.queue.send(Command::Resolve { job_id, choice: JobChoice::VinylConfirm { tracks: plan.tracks, matched: true } });
         let ups = until(&h.rx, is_terminal);
@@ -1252,7 +1258,7 @@ mod tests {
     fn vinyl_without_a_match_imports_needing_metadata() {
         let h = vinyl_harness(VinylFake { releases: vec![], fingerprint_ids: vec![], offline: false });
         h.queue.send(Command::ImportVinyl(vec![h.side.clone()]));
-        let (job_id, plan) = review(&h.rx);
+        let (job_id, plan) = review(&h.rx, true);
         assert!(plan.release.is_none());
         assert_eq!(plan.note.as_deref(), Some("No match found online"));
         h.queue.send(Command::Resolve { job_id, choice: JobChoice::VinylConfirm { tracks: plan.tracks, matched: false } });
@@ -1265,7 +1271,7 @@ mod tests {
     fn vinyl_offline_still_offers_the_gaps() {
         let h = vinyl_harness(VinylFake { releases: vec![], fingerprint_ids: vec![], offline: true });
         h.queue.send(Command::ImportVinyl(vec![h.side.clone()]));
-        let (_, plan) = review(&h.rx);
+        let (_, plan) = review(&h.rx, true);
         assert_eq!(plan.tracks.len(), 3);
         assert!(plan.note.unwrap().contains("Couldn't reach"));
     }
@@ -1276,10 +1282,43 @@ mod tests {
         let fake = VinylFake { releases: vec![candidate("m1", "Album", "Band", &SIDE_TL), other], fingerprint_ids: vec!["m1".into()], offline: false };
         let h = vinyl_harness(fake);
         h.queue.send(Command::ImportVinyl(vec![h.side.clone()]));
-        let (job_id, _) = review(&h.rx);
+        let (job_id, _) = review(&h.rx, true);
         h.queue.send(Command::Resolve { job_id, choice: JobChoice::VinylRealign { mbid: "m2".into() } });
-        let (_, plan) = review(&h.rx);
+        let (_, plan) = review(&h.rx, false);
         assert_eq!(plan.release.unwrap().mbid, "m2");
+    }
+
+    #[test]
+    fn vinyl_realign_after_no_match_clears_the_stale_note() {
+        let fake = VinylFake { releases: vec![candidate("m2", "Album", "Band", &SIDE_TL)], fingerprint_ids: vec![], offline: false };
+        let h = vinyl_harness(fake);
+        h.queue.send(Command::ImportVinyl(vec![h.side.clone()]));
+        let (job_id, plan) = review(&h.rx, true);
+        assert_eq!(plan.note.as_deref(), Some("No match found online"));
+        h.queue.send(Command::Resolve { job_id, choice: JobChoice::VinylRealign { mbid: "m2".into() } });
+        let (_, plan) = review(&h.rx, false);
+        assert_eq!(plan.release.unwrap().mbid, "m2");
+        assert_eq!(plan.note, None);
+    }
+
+    #[test]
+    fn vinyl_empty_search_keeps_candidates_and_warns() {
+        let fake = VinylFake { releases: vec![candidate("m1", "Album", "Band", &SIDE_TL)], fingerprint_ids: vec!["m1".into()], offline: false };
+        let h = vinyl_harness(fake);
+        h.queue.send(Command::ImportVinyl(vec![h.side.clone()]));
+        let (job_id, _) = review(&h.rx, true);
+        // Search returns every release the fake has; to get none, search a fake with no releases.
+        let h2 = vinyl_harness(VinylFake { releases: vec![], fingerprint_ids: vec![], offline: false });
+        h2.queue.send(Command::ImportVinyl(vec![h2.side.clone()]));
+        let (job2, _) = review(&h2.rx, true);
+        h2.queue.send(Command::Resolve { job_id: job2, choice: JobChoice::Search { query: "nothing".into() } });
+        let (_, plan) = review(&h2.rx, false);
+        assert_eq!(plan.warning.as_deref(), Some("No releases found for that search."));
+        // A search that does find releases still replaces the list and sets no warning.
+        h.queue.send(Command::Resolve { job_id, choice: JobChoice::Search { query: "album".into() } });
+        let (_, plan) = review(&h.rx, false);
+        assert_eq!(plan.candidates.len(), 1);
+        assert!(plan.warning.is_none());
     }
 
     #[test]
@@ -1287,7 +1326,7 @@ mod tests {
         let fake = VinylFake { releases: vec![candidate("m1", "Album", "Band", &SIDE_TL)], fingerprint_ids: vec!["m1".into()], offline: false };
         let h = vinyl_harness(fake);
         h.queue.send(Command::ImportVinyl(vec![h.side.clone()]));
-        let (job_id, plan) = review(&h.rx);
+        let (job_id, plan) = review(&h.rx, true);
         h.queue.send(Command::Resolve { job_id, choice: JobChoice::VinylConfirm { tracks: plan.tracks[..2].to_vec(), matched: true } });
         match &until(&h.rx, is_terminal).last().unwrap().state {
             JobState::Failed { error } => assert!(error.contains("pieces"), "{error}"),
