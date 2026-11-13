@@ -56,7 +56,8 @@ fn id3v2_len<R: Read>(r: &mut R) -> Result<u64> {
         return Ok(0);
     }
     let size = h[6..10].iter().fold(0u64, |a, &b| (a << 7) | (b & 0x7F) as u64);
-    let footer = if h[5] & 0x10 != 0 { 10 } else { 0 };
+    // Only ID3v2.4 has a footer (flag 0x10); in earlier versions that bit means nothing.
+    let footer = if h[3] >= 4 && h[5] & 0x10 != 0 { 10 } else { 0 };
     Ok(10 + size + footer)
 }
 
@@ -114,8 +115,12 @@ pub fn scan(path: &Path) -> Result<Index> {
 
     let mut frames: Vec<Frame> = Vec::new();
     let mut bitrates: Vec<u8> = Vec::new();
+    // Walk forward with relative seeks so the BufReader keeps its buffer between frames.
     let mut offset = start;
-    while let Some(h) = read4(&mut r, offset).and_then(header::parse) {
+    r.seek(SeekFrom::Start(start))?;
+    let mut b = [0u8; 4];
+    while r.read_exact(&mut b).is_ok() {
+        let Some(h) = header::parse(b) else { break };
         if !h.same_stream(&first) || h.layer != 3 || h.bitrate_index == 0 {
             break;
         }
@@ -126,6 +131,7 @@ pub fn scan(path: &Path) -> Result<Index> {
         frames.push(Frame { offset, len });
         bitrates.push(h.bitrate_index);
         offset += len as u64;
+        r.seek_relative(len as i64 - 4)?;
     }
     if frames.is_empty() {
         // The first frame itself was cut short.
@@ -242,6 +248,20 @@ mod tests {
                 assert_eq!(w[0].offset + w[0].len as u64, w[1].offset, "{name}");
             }
         }
+    }
+
+    #[test]
+    fn id3v23_ignores_the_footer_flag() {
+        // ID3v2.3 has no footer; bit 0x10 of its flags byte means nothing there.
+        let bytes = std::fs::read(fixture("cbr.mp3")).unwrap();
+        let full = scan(&fixture("cbr.mp3")).unwrap();
+        let mut out = b"ID3    ".to_vec();
+        out.extend([0u8; 20]);
+        out.extend(&bytes[full.frames[0].offset as usize..]);
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("v23.mp3");
+        std::fs::write(&p, out).unwrap();
+        assert_eq!(scan(&p).unwrap().frames.len(), full.frames.len());
     }
 
     #[test]
