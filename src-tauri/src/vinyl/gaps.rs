@@ -75,17 +75,27 @@ fn runs(v: &[bool], want: bool) -> Vec<(usize, usize)> {
     out
 }
 
+/// Frames at or below this are digital silence (exact zeros), not surface noise.
+pub const DIGITAL_SILENCE_DB: f32 = -100.0;
+
 fn percentile(db: &[f32], p: f64) -> f32 {
     let mut s = db.to_vec();
     s.sort_by(f32::total_cmp);
     s[((s.len() - 1) as f64 * p).round() as usize]
 }
 
+/// The record's noise floor. Digital silence (e.g. zeros before the needle drops) is left out, or a
+/// few percent of it would put the floor at -120 dB and every bit of hiss would count as music.
+fn noise_floor(db: &[f32]) -> f32 {
+    let audible: Vec<f32> = db.iter().copied().filter(|&d| d > DIGITAL_SILENCE_DB).collect();
+    percentile(if audible.is_empty() { db } else { &audible }, FLOOR_PERCENTILE)
+}
+
 pub fn analyse(db: &[f32]) -> Analysis {
     if db.is_empty() {
         return Analysis { threshold: 0.0, music_start: 0, music_end: 0, gaps: vec![] };
     }
-    let threshold = percentile(db, FLOOR_PERCENTILE) + THRESHOLD_MARGIN_DB;
+    let threshold = noise_floor(db) + THRESHOLD_MARGIN_DB;
     let mut quiet: Vec<bool> = db.iter().map(|&d| d < threshold).collect();
     // Clicks and pops: short loud blips with quiet on both sides count as quiet.
     for (s, e) in runs(&quiet, false) {
@@ -148,6 +158,22 @@ mod tests {
         let a = analyse(&db);
         assert_eq!(a.music_start, 170);
         assert!(a.gaps.is_empty());
+    }
+
+    #[test]
+    fn digital_silence_does_not_drag_the_floor_down() {
+        // A rip that starts with 5% digital silence (exact zeros, -120 dB) before the needle drops.
+        let db = db_frames(&[(5.5, -120.0), (3.0, H), (30.0, -15.0), (2.0, H), (40.0, -15.0), (2.5, H), (20.0, -15.0), (4.0, H)]);
+        let a = analyse(&db);
+        assert_eq!(a.gaps, vec![Gap { start: 770, end: 810 }, Gap { start: 1610, end: 1660 }]);
+        assert_eq!((a.music_start, a.music_end), (170, 2060));
+    }
+
+    #[test]
+    fn all_digital_silence_has_no_gaps() {
+        let a = analyse(&db_frames(&[(10.0, -120.0)]));
+        assert!(a.gaps.is_empty());
+        assert_eq!((a.music_start, a.music_end), (0, 200));
     }
 
     #[test]
