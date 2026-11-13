@@ -52,6 +52,7 @@ export interface CandidateTrack {
   artist: string;
   length_ms: number | null;
   recording_id: string;
+  side: string | null;
 }
 
 export interface ReleaseCandidate {
@@ -66,12 +67,41 @@ export interface ReleaseCandidate {
   tracks: CandidateTrack[];
 }
 
+export type CutKind = 'start' | 'gap' | 'estimated' | 'manual';
+
+export interface PlanFile {
+  path: string;
+  name: string;
+  duration_ms: number;
+}
+
+export interface PlanTrack {
+  file: number;
+  start_ms: number;
+  end_ms: number;
+  title: string;
+  cut: CutKind;
+  disc: number;
+  number: number;
+}
+
+export interface VinylPlan {
+  files: PlanFile[];
+  release: ReleaseCandidate | null;
+  candidates: ReleaseCandidate[];
+  tracks: PlanTrack[];
+  warning: string | null;
+  note: string | null;
+}
+
 export type JobState =
   | { state: 'queued' }
   | { state: 'identifying' }
   | { state: 'needs_choice'; candidates: ReleaseCandidate[]; current?: string }
   | { state: 'duplicate'; release: ReleaseCandidate; existing_album_id: number }
   | { state: 'importing' }
+  | { state: 'analysing' }
+  | { state: 'needs_vinyl_review'; plan: VinylPlan }
   | { state: 'done'; album_id: number; matched: boolean; note?: string }
   | { state: 'skipped' }
   | { state: 'failed'; error: string };
@@ -83,7 +113,9 @@ export type JobChoice =
   | { kind: 'keep_existing' }
   | { kind: 'skip' }
   | { kind: 'replace' }
-  | { kind: 'search'; query: string };
+  | { kind: 'search'; query: string }
+  | { kind: 'vinyl_realign'; mbid: string }
+  | { kind: 'vinyl_confirm'; tracks: PlanTrack[]; matched: boolean };
 
 export interface AlbumEdit {
   title: string;

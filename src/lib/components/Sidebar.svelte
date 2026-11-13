@@ -7,6 +7,7 @@
     syncing,
     onSelect,
     onCreatePlaylist,
+    onImportVinyl,
   }: {
     view: View;
     needsCount: number;
@@ -14,6 +15,7 @@
     syncing: boolean;
     onSelect: (v: View) => void;
     onCreatePlaylist: (name: string) => Promise<void>;
+    onImportVinyl: () => void;
   } = $props();
 
   let naming = $state(false);
@@ -43,6 +45,7 @@
   <button class:active={is('needs_metadata')} onclick={() => onSelect({ kind: 'needs_metadata' })}>
     Needs metadata {#if needsCount > 0}<span class="badge">{needsCount}</span>{/if}
   </button>
+  <button class="new" onclick={onImportVinyl}>+ Import vinyl recording…</button>
 
   <p class="section">Playlists</p>
   {#each playlists as p (p.id)}

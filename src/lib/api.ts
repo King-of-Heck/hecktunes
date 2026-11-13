@@ -24,6 +24,8 @@ import type {
 export const listAlbums = () => invoke<AlbumRow[]>('list_albums');
 export const albumTracks = (albumId: number) => invoke<TrackRow[]>('album_tracks', { albumId });
 export const importPaths = (paths: string[]) => invoke<void>('import_paths', { paths });
+export const importVinyl = (paths: string[]) => invoke<void>('import_vinyl', { paths });
+export const vinylPreview = (path: string, atMs: number) => invoke<void>('vinyl_preview', { path, atMs: Math.max(0, Math.round(atMs)) });
 export const resolveJob = (jobId: number, choice: JobChoice) => invoke<void>('resolve_job', { jobId, choice });
 export const retryMetadata = (albumId: number) => invoke<number>('retry_metadata', { albumId });
 export const updateAlbum = (albumId: number, edit: AlbumEdit) => invoke<void>('update_album', { albumId, edit });

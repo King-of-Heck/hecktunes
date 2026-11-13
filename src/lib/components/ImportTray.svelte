@@ -8,6 +8,8 @@
     needs_choice: 'Needs your pick',
     duplicate: 'Already in library',
     importing: 'Copying & tagging…',
+    analysing: 'Finding tracks…',
+    needs_vinyl_review: 'Check the tracks',
     done: 'Added',
     skipped: 'Skipped',
     failed: 'Failed',

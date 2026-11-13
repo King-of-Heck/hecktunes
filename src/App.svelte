@@ -6,6 +6,8 @@
   import NowPlaying from './lib/components/NowPlaying.svelte';
   import SyncPanel from './lib/components/SyncPanel.svelte';
   import ReleasePicker from './lib/components/ReleasePicker.svelte';
+  import VinylReview from './lib/components/VinylReview.svelte';
+  import { open } from '@tauri-apps/plugin-dialog';
   import TagEditor from './lib/components/TagEditor.svelte';
   import Sidebar from './lib/components/Sidebar.svelte';
   import AlbumGrid from './lib/components/AlbumGrid.svelte';
@@ -53,6 +55,18 @@
       .filter((j): j is JobUpdate & ({ state: 'needs_choice' } | { state: 'duplicate' }) => j.state === 'needs_choice' || j.state === 'duplicate')
       .sort((a, b) => a.job_id - b.job_id)[0] ?? null,
   );
+
+  const reviewing = $derived(
+    jobList
+      .filter((j): j is JobUpdate & { state: 'needs_vinyl_review' } => j.state === 'needs_vinyl_review')
+      .sort((a, b) => a.job_id - b.job_id)[0] ?? null,
+  );
+
+  async function importVinyl() {
+    const picked = await open({ multiple: true, title: 'Choose a vinyl recording (one WAV, or one per side)', filters: [{ name: 'WAV', extensions: ['wav'] }] });
+    if (!picked || picked.length === 0) return;
+    api.importVinyl(picked).catch(logError('vinyl import failed'));
+  }
 
   // Why the library or playlists couldn't be loaded, shown in a banner instead of an empty library.
   let loadError = $state<string | null>(null);
@@ -187,7 +201,7 @@
 
 <div class="app">
 <div class="layout">
-  <Sidebar {view} needsCount={needs.length} {playlists} {syncing} onSelect={select} onCreatePlaylist={createPlaylist} />
+  <Sidebar {view} needsCount={needs.length} {playlists} {syncing} onSelect={select} onCreatePlaylist={createPlaylist} onImportVinyl={importVinyl} />
   <main>
     {#if loadError}
       <p class="banner error">{loadError} <button class="link" onclick={retryLoad}>Try again</button></p>
@@ -261,6 +275,11 @@
 {#if waiting}
   {#key waiting.job_id}
     <ReleasePicker job={waiting} {syncing} />
+  {/key}
+{/if}
+{#if reviewing && !waiting}
+  {#key reviewing.job_id}
+    <VinylReview job={reviewing} {syncing} />
   {/key}
 {/if}
 {#if editing && selected}
