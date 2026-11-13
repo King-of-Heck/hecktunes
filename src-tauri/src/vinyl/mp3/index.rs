@@ -61,6 +61,42 @@ fn id3v2_len<R: Read>(r: &mut R) -> Result<u64> {
     Ok(10 + size + footer)
 }
 
+/// More than this many unread bytes after the last frame (not counting end tags) means the file is
+/// damaged in the middle rather than cut short in its last frame.
+const MAX_TAIL_BYTES: u64 = 4096;
+
+/// Where the audio may end: the file length less a trailing ID3v1 tag and an APEv2 tag.
+fn audio_end(r: &mut BufReader<File>, file_len: u64) -> Result<u64> {
+    let mut end = file_len;
+    if end >= 128 {
+        r.seek(SeekFrom::Start(end - 128))?;
+        let mut tag = [0u8; 3];
+        r.read_exact(&mut tag)?;
+        if &tag == b"TAG" {
+            end -= 128;
+        }
+    }
+    if end >= 32 {
+        r.seek(SeekFrom::Start(end - 32))?;
+        let mut footer = [0u8; 32];
+        r.read_exact(&mut footer)?;
+        if &footer[..8] == b"APETAGEX" {
+            // Bytes 12..16: tag size without its header; bit 31 of the flags: it has a header.
+            let size = u32::from_le_bytes(footer[12..16].try_into()?) as u64;
+            let flags = u32::from_le_bytes(footer[20..24].try_into()?);
+            let header = if flags & 0x8000_0000 != 0 { 32 } else { 0 };
+            end = end.saturating_sub(size + header);
+        }
+    }
+    Ok(end)
+}
+
+/// "M:SS" for a sample position.
+fn clock(samples: u64, rate: u32) -> String {
+    let secs = samples / rate as u64;
+    format!("{}:{:02}", secs / 60, secs % 60)
+}
+
 fn read4(r: &mut BufReader<File>, at: u64) -> Option<[u8; 4]> {
     r.seek(SeekFrom::Start(at)).ok()?;
     let mut b = [0u8; 4];
@@ -159,6 +195,12 @@ pub fn scan(path: &Path) -> Result<Index> {
         bail!("{name} has no MP3 audio");
     }
 
+    // A walk that stopped well before the end met damage, not a cut-short last frame.
+    if audio_end(&mut r, file_len)?.saturating_sub(offset) > MAX_TAIL_BYTES {
+        let good = (frames.len() as u64 * first.samples_per_frame() as u64).saturating_sub(delay as u64);
+        bail!("{name} is damaged after {}; HeckTunes can only read it up to there", clock(good, first.sample_rate));
+    }
+
     let first_header = read4(&mut r, frames[0].offset).context("short read")?;
     Ok(Index {
         version: first.version,
@@ -176,7 +218,7 @@ pub fn scan(path: &Path) -> Result<Index> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
     fn fixture(name: &str) -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/vinyl").join(name)
@@ -240,6 +282,71 @@ mod tests {
         assert_eq!(cut.frames.len(), full.frames.len() - 1);
     }
 
+    /// cbr.mp3 with `insert` placed right after its 50th audio frame.
+    fn cbr_with_insert(dir: &Path, insert: &[u8]) -> PathBuf {
+        let bytes = std::fs::read(fixture("cbr.mp3")).unwrap();
+        let at = scan(&fixture("cbr.mp3")).unwrap().frames[50].offset as usize;
+        let mut out = bytes[..at].to_vec();
+        out.extend_from_slice(insert);
+        out.extend_from_slice(&bytes[at..]);
+        let p = dir.join("damaged.mp3");
+        std::fs::write(&p, out).unwrap();
+        p
+    }
+
+    #[test]
+    fn damage_in_the_middle_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let e = scan(&cbr_with_insert(dir.path(), &[0u8; 65_536])).unwrap_err().to_string();
+        assert_eq!(e, "damaged.mp3 is damaged after 0:01; HeckTunes can only read it up to there");
+    }
+
+    #[test]
+    fn a_stream_change_in_the_middle_fails() {
+        let mono = scan(&fixture("mono22k.mp3")).unwrap();
+        let bytes = std::fs::read(fixture("mono22k.mp3")).unwrap();
+        let (a, last) = (mono.frames[0].offset as usize, mono.frames[99]);
+        let other = &bytes[a..(last.offset + last.len as u64) as usize];
+        assert!(other.len() > 4096);
+        let dir = tempfile::tempdir().unwrap();
+        let e = scan(&cbr_with_insert(dir.path(), other)).unwrap_err().to_string();
+        assert!(e.contains("damaged.mp3 is damaged after 0:01"), "{e}");
+    }
+
+    #[test]
+    fn end_tags_are_not_damage() {
+        let bytes = std::fs::read(fixture("cbr.mp3")).unwrap();
+        let full = scan(&fixture("cbr.mp3")).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+
+        let mut tag = b"TAG".to_vec();
+        tag.resize(128, b' ');
+        let mut v1 = bytes.clone();
+        v1.extend_from_slice(&tag);
+        let p = dir.path().join("v1.mp3");
+        std::fs::write(&p, &v1).unwrap();
+        assert_eq!(scan(&p).unwrap().frames.len(), full.frames.len());
+
+        // An APEv2 tag (header, 5000 bytes of items, footer), then an ID3v1 tag.
+        let ape = |flags: u32| {
+            let mut b = b"APETAGEX".to_vec();
+            b.extend(2000u32.to_le_bytes());
+            b.extend((5000u32 + 32).to_le_bytes());
+            b.extend(1u32.to_le_bytes());
+            b.extend(flags.to_le_bytes());
+            b.extend([0u8; 8]);
+            b
+        };
+        let mut both = bytes.clone();
+        both.extend(ape(0xA000_0000));
+        both.extend([b'x'; 5000]);
+        both.extend(ape(0x8000_0000));
+        both.extend_from_slice(&tag);
+        let p = dir.path().join("ape.mp3");
+        std::fs::write(&p, &both).unwrap();
+        assert_eq!(scan(&p).unwrap().frames.len(), full.frames.len());
+    }
+
     #[test]
     fn frames_are_contiguous() {
         for name in ["cbr.mp3", "vbr.mp3", "mono22k.mp3"] {
@@ -255,7 +362,7 @@ mod tests {
         // ID3v2.3 has no footer; bit 0x10 of its flags byte means nothing there.
         let bytes = std::fs::read(fixture("cbr.mp3")).unwrap();
         let full = scan(&fixture("cbr.mp3")).unwrap();
-        let mut out = b"ID3    ".to_vec();
+        let mut out = b"ID3\x03\x00\x10\x00\x00\x00\x14".to_vec();
         out.extend([0u8; 20]);
         out.extend(&bytes[full.frames[0].offset as usize..]);
         let dir = tempfile::tempdir().unwrap();

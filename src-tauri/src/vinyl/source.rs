@@ -43,6 +43,16 @@ impl SourceInfo {
         (ms * self.sample_rate as u64 / 1000).min(self.frames)
     }
 
+    /// The frame a track ending at `ms` ends at. For an MP3, a track ending at `duration_ms()`
+    /// (which is floored) runs to the very end, so it keeps its last frame; WAVs use
+    /// `ms_to_frame`.
+    pub fn ms_to_end_frame(&self, ms: u64) -> u64 {
+        match self.format {
+            Format::Mp3(_) if ms >= self.duration_ms() => self.frames,
+            _ => self.ms_to_frame(ms),
+        }
+    }
+
     /// Same kind, rate and channels (and for WAVs the same depth), so two sides can become one
     /// album. Two MP3s may differ in bitrate.
     pub fn same_format(&self, other: &SourceInfo) -> bool {
@@ -87,7 +97,7 @@ impl SourceInfo {
     pub fn track_bytes(&self, start_ms: u64, end_ms: u64) -> u64 {
         match &self.format {
             Format::Wav { .. } => ((end_ms.saturating_sub(start_ms) * self.byte_rate() / 1000) as f64 * FLAC_SIZE_RATIO) as u64,
-            Format::Mp3(ix) => cut::cut_bytes(ix, cut::frame_span(ix, self.ms_to_frame(start_ms), self.ms_to_frame(end_ms))),
+            Format::Mp3(ix) => cut::cut_bytes(ix, cut::frame_span(ix, self.ms_to_frame(start_ms), self.ms_to_end_frame(end_ms))),
         }
     }
 
@@ -241,6 +251,53 @@ mod tests {
         assert_eq!(info.frames, index.total_samples());
         assert_eq!(info.describe(), "MP3, 44.1 kHz, stereo");
         assert_eq!(probe(&fixture("mono22k.mp3")).unwrap().describe(), "MP3, 22.05 kHz, mono");
+    }
+
+    #[test]
+    fn a_track_ending_at_the_end_keeps_the_last_frame() {
+        for name in ["cbr.mp3", "vbr.mp3", "mono22k.mp3"] {
+            let info = probe(&fixture(name)).unwrap();
+            let Format::Mp3(ix) = &info.format else { panic!("not MP3") };
+            let end = info.ms_to_end_frame(info.duration_ms());
+            assert_eq!(end, info.frames, "{name}");
+            assert_eq!(cut::frame_span(ix, 0, end).end, ix.frames.len(), "{name}");
+            let whole = cut::cut_bytes(ix, 0..ix.frames.len());
+            assert_eq!(info.track_bytes(0, info.duration_ms()), whole, "{name}");
+        }
+        // With more than half a frame of padding, rounding the floored end lost the last frame.
+        let ix = Index {
+            version: crate::vinyl::mp3::header::Version::Mpeg1,
+            sample_rate: 44100,
+            channels: 2,
+            samples_per_frame: 1152,
+            delay: 1105,
+            padding: 1000,
+            frames: (0..100).map(|i| index::Frame { offset: 1000 + i * 417, len: 417 }).collect(),
+            variable_bitrate: false,
+            first_header: [0xFF, 0xFB, 0x90, 0x00],
+        };
+        let info = SourceInfo {
+            path: PathBuf::from("synthetic.mp3"),
+            sample_rate: 44100,
+            channels: 2,
+            bits: 16,
+            frames: ix.total_samples(),
+            format: Format::Mp3(Arc::new(ix.clone())),
+        };
+        assert_eq!(cut::frame_span(&ix, 0, info.ms_to_frame(info.duration_ms())).end, 99, "the old rounding");
+        assert_eq!(cut::frame_span(&ix, 0, info.ms_to_end_frame(info.duration_ms())).end, 100);
+        assert_eq!(info.track_bytes(0, info.duration_ms()), cut::cut_bytes(&ix, 0..100));
+    }
+
+    #[test]
+    fn end_frame_of_a_wav_is_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("a.wav");
+        write_pattern_wav(&p, 44100, 1, 16, &[tone(1.0005, 0.5)]);
+        let info = probe(&p).unwrap();
+        let ms = info.duration_ms();
+        assert!(info.ms_to_frame(ms) < info.frames);
+        assert_eq!(info.ms_to_end_frame(ms), info.ms_to_frame(ms));
     }
 
     #[test]

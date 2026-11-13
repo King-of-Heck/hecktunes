@@ -321,7 +321,7 @@ pub fn write_tracks(rec: &Recording, tracks: &[PlanTrack], dir: &Path) -> Result
     for (i, t) in tracks.iter().enumerate() {
         let info = &rec.files[t.file].info;
         let path = dir.join(format!("{:02}.{}", i + 1, info.track_extension()));
-        let (start, end) = (info.ms_to_frame(t.start_ms), info.ms_to_frame(t.end_ms));
+        let (start, end) = (info.ms_to_frame(t.start_ms), info.ms_to_end_frame(t.end_ms));
         match &info.format {
             source::Format::Wav { .. } => encode::encode_range(info, start, end, &path)?,
             source::Format::Mp3(ix) => mp3::cut::write_cut(&info.path, ix, mp3::cut::frame_span(ix, start, end), &path)?,
