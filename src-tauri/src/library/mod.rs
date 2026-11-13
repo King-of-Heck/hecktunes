@@ -424,6 +424,13 @@ impl Library {
         Ok(())
     }
 
+    /// Points the album at its cover file (stored relative to the library folder), or clears it.
+    pub fn set_album_cover_path(&mut self, id: i64, cover: Option<&Path>) -> Result<()> {
+        let rel = cover.map(|c| rel_text(c.strip_prefix(&self.root).unwrap_or(c)));
+        self.conn.execute("UPDATE albums SET cover_path = ?1 WHERE id = ?2", params![rel, id])?;
+        Ok(())
+    }
+
     pub fn move_album_folder(&mut self, id: i64, new_rel: &Path) -> Result<()> {
         let album = self.album(id)?.ok_or_else(|| anyhow!("album {id} not found"))?;
         let tracks = self.album_tracks(id)?;

@@ -1,3 +1,4 @@
+use crate::artwork::prepare_cover;
 use crate::library::hash::file_hash;
 use crate::library::{AlbumEdit, AlbumRow, Library, TrackEdit, TrackRow};
 use crate::model::TrackTags;
@@ -67,6 +68,29 @@ pub fn apply_track_edit(lib: &mut Library, track_id: i64, edit: &TrackEdit) -> R
         return Err(e);
     }
     record_file_state(lib, &track)
+}
+
+/// Replaces the album's cover: writes `cover.jpg` in its folder, embeds the same JPEG in every
+/// track, and points the album at the file. A file that isn't an image changes nothing.
+pub fn set_album_cover(lib: &mut Library, album_id: i64, image: &[u8]) -> Result<()> {
+    let cover = prepare_cover(image).map_err(|_| anyhow!("That file isn't an image HeckTunes can read"))?;
+    let album = lib.album(album_id)?.ok_or_else(|| anyhow!("album {album_id} not found"))?;
+    let tracks = lib.album_tracks(album_id)?;
+    let target = album.folder_path.join("cover.jpg");
+    let tmp = album.folder_path.join("cover.jpg.tmp");
+    if let Err(e) = std::fs::write(&tmp, &cover).and_then(|_| std::fs::rename(&tmp, &target)) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e.into());
+    }
+    lib.set_album_cover_path(album_id, Some(&target))?;
+    for t in &tracks {
+        if let Err(e) = write_tags(&t.file_path, &tags_for(&album, t, &tracks), Some(&cover)) {
+            record_all(lib, &tracks);
+            return Err(e);
+        }
+        record_file_state(lib, t)?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -197,5 +221,72 @@ mod tests {
         make_writable(&tracks[1].file_path);
         assert!(result.is_err());
         assert_state_is_real(&lib, tracks[1].id);
+    }
+
+    fn lib_with_album(cover: bool) -> (tempfile::TempDir, Library, i64) {
+        let dir = tempfile::tempdir().unwrap();
+        let mut lib = Library::open_in_memory(dir.path().join("lib")).unwrap();
+        let id = crate::test_support::add_album(&mut lib, dir.path(), "Alb", "Band", 2, cover);
+        (dir, lib, id)
+    }
+
+    #[test]
+    fn set_cover_writes_a_downsized_cover_jpg_and_points_the_album_at_it() {
+        let (_dir, mut lib, id) = lib_with_album(true);
+        let folder = lib.album(id).unwrap().unwrap().folder_path;
+
+        set_album_cover(&mut lib, id, &crate::test_support::png_bytes(1200, 900)).unwrap();
+
+        let written = std::fs::read(folder.join("cover.jpg")).unwrap();
+        let img = image::load_from_memory(&written).unwrap();
+        assert!(img.width() <= 600 && img.height() <= 600);
+        assert_eq!(img.width(), 600);
+        assert_eq!(lib.album(id).unwrap().unwrap().cover_path, Some(folder.join("cover.jpg")));
+        assert!(!folder.join("cover.jpg.tmp").exists());
+    }
+
+    #[test]
+    fn set_cover_sets_cover_path_when_the_album_had_none() {
+        let (_dir, mut lib, id) = lib_with_album(false);
+        assert!(lib.album(id).unwrap().unwrap().cover_path.is_none());
+        set_album_cover(&mut lib, id, &crate::test_support::png_bytes(64, 64)).unwrap();
+        let row = lib.album(id).unwrap().unwrap();
+        assert_eq!(row.cover_path, Some(row.folder_path.join("cover.jpg")));
+    }
+
+    #[test]
+    fn set_cover_embeds_the_new_cover_in_every_track_and_keeps_hashes_true() {
+        let (_dir, mut lib, id) = lib_with_album(true);
+        let folder = lib.album(id).unwrap().unwrap().folder_path;
+
+        set_album_cover(&mut lib, id, &crate::test_support::png_bytes(300, 300)).unwrap();
+
+        let jpeg = std::fs::read(folder.join("cover.jpg")).unwrap();
+        let tracks = lib.album_tracks(id).unwrap();
+        assert_eq!(tracks.len(), 2);
+        for t in &tracks {
+            assert_eq!(crate::tags::embedded_cover(&t.file_path).as_deref(), Some(jpeg.as_slice()));
+            assert_state_is_real(&lib, t.id);
+        }
+    }
+
+    #[test]
+    fn set_cover_with_a_non_image_changes_nothing() {
+        let (_dir, mut lib, id) = lib_with_album(true);
+        let before_album = lib.album(id).unwrap().unwrap();
+        let cover_before = std::fs::read(before_album.folder_path.join("cover.jpg")).unwrap();
+        let before_tracks = lib.album_tracks(id).unwrap();
+        let files_before: Vec<Vec<u8>> = before_tracks.iter().map(|t| std::fs::read(&t.file_path).unwrap()).collect();
+
+        let err = set_album_cover(&mut lib, id, b"definitely not an image").unwrap_err();
+
+        assert!(err.to_string().contains("isn't an image HeckTunes can read"), "{err}");
+        assert_eq!(std::fs::read(before_album.folder_path.join("cover.jpg")).unwrap(), cover_before);
+        assert_eq!(lib.album(id).unwrap().unwrap().cover_path, before_album.cover_path);
+        for (t, bytes) in before_tracks.iter().zip(&files_before) {
+            assert_eq!(&std::fs::read(&t.file_path).unwrap(), bytes);
+            let now = lib.track(t.id).unwrap().unwrap();
+            assert_eq!((now.size_bytes, now.content_hash), (t.size_bytes, t.content_hash.clone()));
+        }
     }
 }

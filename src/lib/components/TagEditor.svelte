@@ -1,5 +1,6 @@
 <script lang="ts">
-  import { updateAlbum, updateTrack } from '../api';
+  import { open } from '@tauri-apps/plugin-dialog';
+  import { coverUrl, setAlbumCover, updateAlbum, updateTrack } from '../api';
   import type { AlbumRow, TrackRow } from '../types';
   let { album, tracks, syncing, onClose }: { album: AlbumRow; tracks: TrackRow[]; syncing: boolean; onClose: (changed: boolean) => void } = $props();
 
@@ -10,6 +11,30 @@
   let ts = $state(tracks.map((t) => ({ id: t.id, title: t.title, artist: t.artist, disc: t.disc, number: t.number })));
   let saving = $state(false);
   let error = $state<string | null>(null);
+  let coverBust = $state(0);
+  // svelte-ignore state_referenced_locally
+  let coverPath = $state(album.cover_path);
+  let coverChanged = $state(false);
+  let coverStatus = $state<string | null>(null);
+
+  async function changeCover() {
+    error = null;
+    coverStatus = null;
+    try {
+      const picked = await open({ multiple: false, filters: [{ name: 'Images', extensions: ['jpg', 'jpeg', 'png'] }] });
+      if (typeof picked !== 'string') return;
+      saving = true;
+      await setAlbumCover(album.id, picked);
+      coverChanged = true;
+      coverPath = album.cover_path ?? `${album.folder_path}/cover.jpg`;
+      coverBust++;
+      coverStatus = 'Cover updated';
+    } catch (e) {
+      error = String(e);
+    } finally {
+      saving = false;
+    }
+  }
 
   async function save() {
     saving = true;
@@ -33,6 +58,13 @@
 <div class="backdrop">
   <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="editor-title">
     <h3 id="editor-title">Edit tags</h3>
+    <div class="cover-row">
+      {#if coverUrl(coverPath, coverBust)}<img class="cover" src={coverUrl(coverPath, coverBust)} alt="Album cover" />{:else}<div class="cover none">No cover</div>{/if}
+      <div>
+        <button onclick={changeCover} disabled={saving || syncing}>Change cover…</button>
+        {#if coverStatus}<p class="note">{coverStatus}</p>{/if}
+      </div>
+    </div>
     <div class="album">
       <label>Album <input bind:value={a.title} /></label>
       <label>Album artist <input bind:value={a.album_artist} /></label>
@@ -55,7 +87,7 @@
     {#if error}<p class="error">{error}</p>{/if}
     {#if syncing}<p class="note">Saving is paused while the Echo Mini sync runs.</p>{/if}
     <div class="footer">
-      <button onclick={() => onClose(false)} disabled={saving}>Cancel</button>
+      <button onclick={() => onClose(coverChanged)} disabled={saving}>Cancel</button>
       <button class="primary" onclick={save} disabled={saving || syncing}>{saving ? 'Saving…' : 'Save'}</button>
     </div>
   </div>
@@ -65,6 +97,9 @@
   .backdrop { position: fixed; inset: 0; background: rgb(0 0 0 / 0.45); display: grid; place-items: center; z-index: 60; }
   .dialog { background: var(--panel); border-radius: 12px; width: min(820px, 94vw); max-height: 88vh; overflow: auto; padding: 20px 24px; }
   h3 { margin: 0 0 12px; }
+  .cover-row { display: flex; align-items: center; gap: 14px; margin-bottom: 14px; }
+  .cover { width: 96px; height: 96px; object-fit: cover; border-radius: 6px; background: var(--bg, #222); }
+  .cover.none { display: grid; place-items: center; font-size: 12px; color: var(--muted); border: 1px dashed var(--muted); }
   .album { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 16px; }
   label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--muted); }
   table { width: 100%; border-collapse: collapse; }

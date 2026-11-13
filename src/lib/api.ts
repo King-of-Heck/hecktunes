@@ -28,6 +28,7 @@ export const resolveJob = (jobId: number, choice: JobChoice) => invoke<void>('re
 export const retryMetadata = (albumId: number) => invoke<number>('retry_metadata', { albumId });
 export const updateAlbum = (albumId: number, edit: AlbumEdit) => invoke<void>('update_album', { albumId, edit });
 export const updateTrack = (trackId: number, edit: TrackEdit) => invoke<void>('update_track', { trackId, edit });
+export const setAlbumCover = (albumId: number, path: string) => invoke<void>('set_album_cover', { albumId, path });
 export const listSongs = () => invoke<SongRow[]>('list_songs');
 export const deleteAlbum = (albumId: number) => invoke<void>('delete_album', { albumId });
 

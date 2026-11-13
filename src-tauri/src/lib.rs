@@ -95,6 +95,7 @@ pub fn run() {
             commands::resolve_job,
             commands::retry_metadata,
             commands::update_album,
+            commands::set_album_cover,
             commands::update_track,
             commands::list_songs,
             commands::delete_album,

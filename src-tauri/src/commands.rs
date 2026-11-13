@@ -170,6 +170,21 @@ pub fn update_album(state: State<AppState>, album_id: i64, edit: AlbumEdit) -> C
     editing::apply_album_edit(&mut state.lib.lock().unwrap(), album_id, &edit).map_err(err)
 }
 
+/// Largest image file accepted as a new cover.
+const MAX_COVER_FILE_BYTES: u64 = 25 * 1024 * 1024;
+
+#[tauri::command(async)]
+pub fn set_album_cover(state: State<AppState>, album_id: i64, path: String) -> CmdResult<()> {
+    library_change_ready(&state)?;
+    let size = std::fs::metadata(&path).map_err(|e| format!("Couldn't read that file: {e}"))?.len();
+    if size > MAX_COVER_FILE_BYTES {
+        return Err("That image is larger than 25 MB.".to_string());
+    }
+    let bytes = std::fs::read(&path).map_err(|e| format!("Couldn't read that file: {e}"))?;
+    release_album_files(&state.player, &state.lib, album_id)?;
+    editing::set_album_cover(&mut state.lib.lock().unwrap(), album_id, &bytes).map_err(err)
+}
+
 #[tauri::command(async)]
 pub fn update_track(state: State<AppState>, track_id: i64, edit: TrackEdit) -> CmdResult<()> {
     library_change_ready(&state)?;
