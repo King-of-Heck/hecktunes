@@ -17,6 +17,10 @@ pub trait MetadataSource: Send + Sync {
     fn search_text(&self, query: &str) -> Result<Vec<String>>;
     /// Release MBIDs found by audio fingerprint.
     fn by_fingerprint(&self, track: &SourceTrack) -> Result<Vec<String>>;
+    /// Release MBIDs for a fingerprint already computed from `duration_secs` of audio.
+    fn by_fingerprint_code(&self, _fingerprint: &str, _duration_secs: u32) -> Result<Vec<String>> {
+        Ok(vec![])
+    }
     fn release(&self, mbid: &str) -> Result<ReleaseCandidate>;
     fn cover(&self, mbid: &str) -> Result<Option<Vec<u8>>>;
 }
@@ -147,6 +151,11 @@ impl MetadataSource for OnlineSource {
             }
         };
         client.lookup(&fp, (track.duration_ms / 1000) as u32)
+    }
+
+    fn by_fingerprint_code(&self, fingerprint: &str, duration_secs: u32) -> Result<Vec<String>> {
+        let Some(client) = &self.acoustid else { return Ok(vec![]) };
+        client.lookup(fingerprint, duration_secs)
     }
 
     fn release(&self, mbid: &str) -> Result<ReleaseCandidate> {
@@ -431,6 +440,11 @@ mod tests {
         };
         let err = rank_candidates(&tracks, &failed).unwrap_err();
         assert!(format!("{err:#}").contains("release offline"));
+    }
+
+    #[test]
+    fn fingerprint_codes_need_a_key() {
+        assert!(OnlineSource::new(None).by_fingerprint_code("AQAA", 30).unwrap().is_empty());
     }
 
     #[test]

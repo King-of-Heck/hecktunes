@@ -10,7 +10,23 @@ use symphonia::core::formats::{FormatOptions, TrackType};
 use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::MetadataOptions;
 
-const MAX_SECONDS: u64 = 120;
+pub const MAX_SECONDS: u64 = 120;
+
+fn compress(config: &Configuration, fingerprint: &[u32]) -> String {
+    let compressed = FingerprintCompressor::from(config).compress(fingerprint);
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(compressed)
+}
+
+/// Fingerprint of interleaved 16-bit samples; only the first MAX_SECONDS are used.
+pub fn fingerprint_pcm(samples: &[i16], sample_rate: u32, channels: u32) -> Result<String> {
+    let config = Configuration::preset_test2();
+    let mut printer = Fingerprinter::new(&config);
+    printer.start(sample_rate, channels).map_err(|e| anyhow!("fingerprinter: {e:?}"))?;
+    let budget = (MAX_SECONDS * sample_rate as u64 * channels as u64) as usize;
+    printer.consume(&samples[..samples.len().min(budget)]);
+    printer.finish();
+    Ok(compress(&config, printer.fingerprint()))
+}
 
 pub fn fingerprint_file(path: &Path) -> Result<String> {
     let file = File::open(path).with_context(|| format!("cannot open {}", path.display()))?;
@@ -70,8 +86,7 @@ pub fn fingerprint_file(path: &Path) -> Result<String> {
         return Err(anyhow!("no audio decoded"));
     }
     printer.finish();
-    let compressed = FingerprintCompressor::from(&config).compress(printer.fingerprint());
-    Ok(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(compressed))
+    Ok(compress(&config, printer.fingerprint()))
 }
 
 #[cfg(test)]
@@ -92,5 +107,14 @@ mod tests {
     #[test]
     fn missing_file_errors() {
         assert!(fingerprint_file(Path::new("does/not/exist.flac")).is_err());
+    }
+
+    #[test]
+    fn pcm_fingerprint_matches_the_file_fingerprint() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("a.wav");
+        write_wav(&p, 10);
+        let samples: Vec<i16> = hound::WavReader::open(&p).unwrap().samples::<i16>().map(|s| s.unwrap()).collect();
+        assert_eq!(fingerprint_pcm(&samples, 8000, 1).unwrap(), fingerprint_file(&p).unwrap());
     }
 }
