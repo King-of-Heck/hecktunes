@@ -72,15 +72,17 @@ pub fn identify(rec: &Recording, source: &dyn MetadataSource) -> Result<Vec<Rele
             None => Ok(vec![]),
         };
     }
-    Ok(rank(found, rec.music_ms()))
+    Ok(rank(found, |r| rec.music_ms(Some(r))))
 }
 
 /// Releases that fit the recording's length first, then vinyl editions, then the most fingerprint
-/// agreement, then the closest length.
-pub fn rank(found: Vec<(ReleaseCandidate, usize)>, music_ms: u64) -> Vec<ReleaseCandidate> {
+/// agreement, then the closest length. `music_ms` is the recording's music length as that release
+/// places the side flip.
+pub fn rank(found: Vec<(ReleaseCandidate, usize)>, music_ms: impl Fn(&ReleaseCandidate) -> u64) -> Vec<ReleaseCandidate> {
     let mut keyed: Vec<_> = found
         .into_iter()
         .map(|(r, agree)| {
+            let music_ms = music_ms(&r);
             let diff = release_ms(&r).map(|t| t.abs_diff(music_ms));
             let fits = diff.is_some_and(|d| d as f64 <= FIT_TOLERANCE * music_ms as f64);
             let vinyl = r.format.as_deref().is_some_and(|f| f.to_lowercase().contains("vinyl"));
@@ -127,7 +129,7 @@ mod tests {
         fits_lp.format = Some("12\" Vinyl".into());
         let mut long_lp = candidate("long", "A", "B", &[("x", 90_000)]);
         long_lp.format = Some("Vinyl".into());
-        let ranked = rank(vec![(long_lp, 3), (fits_cd, 3), (fits_lp, 1)], 60_000);
+        let ranked = rank(vec![(long_lp, 3), (fits_cd, 3), (fits_lp, 1)], |_| 60_000);
         assert_eq!(ranked.iter().map(|c| c.mbid.as_str()).collect::<Vec<_>>(), ["lp", "cd", "long"]);
     }
 }

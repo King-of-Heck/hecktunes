@@ -10,6 +10,7 @@ use crate::device::detect::available_space;
 use crate::import::scan::AlbumGroup;
 use crate::model::{ReleaseCandidate, SourceTrack};
 use align::{fill_unknown, flip_gap, side_a_count, split_sides, CutKind};
+use gaps::Gap;
 use anyhow::{bail, Result};
 use envelope::frame_to_ms;
 use gaps::Analysis;
@@ -97,14 +98,30 @@ pub fn load(paths: &[PathBuf]) -> Result<Recording> {
     Ok(Recording { files })
 }
 
+/// The side flip of a one-file recording and, when `release` is given, how many of its tracks come
+/// before it. With side letters the flip is the gap near side A's expected end (and side A's track
+/// count is known); otherwise it is the longest gap of at least FLIP_MIN_FRAMES, and the tracks are
+/// split around it by best fit of their lengths to the music before and after it.
+fn side_flip(rec: &Recording, release: Option<&ReleaseCandidate>) -> Option<(Gap, Option<usize>)> {
+    let [f] = rec.files.as_slice() else { return None };
+    let a = &f.analysis;
+    let tracks = release.map(|r| r.tracks.as_slice()).filter(|t| !t.is_empty());
+    if let Some(k) = tracks.and_then(side_a_count) {
+        let lens = fill_unknown(&tracks?.iter().map(|t| t.length_ms).collect::<Vec<_>>());
+        return flip_gap(&a.gaps, a.music_start, lens[..k].iter().sum()).map(|g| (g, Some(k)));
+    }
+    let g = a.gaps.iter().copied().filter(|g| g.len() >= FLIP_MIN_FRAMES).max_by_key(Gap::len)?;
+    let around = [frame_to_ms(g.start - a.music_start), frame_to_ms(a.music_end - g.end)];
+    let k = tracks.filter(|t| t.len() >= 2).map(|t| split_sides(t, around));
+    Some((g, k))
+}
+
 impl Recording {
-    /// Music length in ms: run-in and run-out excluded, and in a one-file recording the side flip.
-    pub fn music_ms(&self) -> u64 {
+    /// Music length in ms: run-in and run-out excluded, and in a one-file recording the side flip
+    /// (as `release` places it; see `side_flip`).
+    pub fn music_ms(&self, release: Option<&ReleaseCandidate>) -> u64 {
         let span: usize = self.files.iter().map(|f| f.analysis.music_end - f.analysis.music_start).sum();
-        let flip = match self.files.as_slice() {
-            [f] => f.analysis.gaps.iter().map(|g| g.len()).max().filter(|&l| l >= FLIP_MIN_FRAMES).unwrap_or(0),
-            _ => 0,
-        };
+        let flip = side_flip(self, release).map_or(0, |(g, _)| g.len());
         frame_to_ms(span.saturating_sub(flip))
     }
 
@@ -148,7 +165,7 @@ fn fit_warning(music_ms: u64, r: &ReleaseCandidate) -> Option<String> {
 /// The review screen's warning: `message` (something that just went wrong, e.g. a failed search or
 /// a refused import) followed by the release's length warning, which stays until the release changes.
 pub fn warning(rec: &Recording, release: Option<&ReleaseCandidate>, message: Option<String>) -> Option<String> {
-    let fit = release.filter(|r| !r.tracks.is_empty()).and_then(|r| fit_warning(rec.music_ms(), r));
+    let fit = release.filter(|r| !r.tracks.is_empty()).and_then(|r| fit_warning(rec.music_ms(Some(r)), r));
     match (message, fit) {
         (Some(m), Some(f)) => Some(format!("{m}\n{f}")),
         (m, f) => m.or(f),
@@ -209,12 +226,8 @@ fn stretches(rec: &Recording, r: &ReleaseCandidate) -> Vec<Stretch> {
     match rec.files.as_slice() {
         [f] => {
             let a = &f.analysis;
-            let flip = side_a_count(&r.tracks).and_then(|k| {
-                let lens = fill_unknown(&r.tracks.iter().map(|t| t.length_ms).collect::<Vec<_>>());
-                flip_gap(&a.gaps, a.music_start, lens[..k].iter().sum()).map(|g| (k, g))
-            });
-            match flip {
-                Some((k, g)) => vec![
+            match side_flip(rec, Some(r)) {
+                Some((g, Some(k))) => vec![
                     Stretch {
                         file: 0,
                         music: (a.music_start, g.start),
@@ -224,7 +237,7 @@ fn stretches(rec: &Recording, r: &ReleaseCandidate) -> Vec<Stretch> {
                     },
                     Stretch { file: 0, music: (g.end, a.music_end), first_start: g.cut(), last_end: a.last_end(f.db.len()), tracks: k..n },
                 ],
-                None => vec![whole(0, 0..n)],
+                _ => vec![whole(0, 0..n)],
             }
         }
         _ => {
@@ -420,6 +433,23 @@ mod tests {
         assert_eq!(p.tracks.len(), 4);
         assert!(near(p.tracks[1].end_ms, 76_000), "{:?}", spans(&p));
         assert!(near(p.tracks[2].start_ms, 94_700), "{:?}", spans(&p));
+        assert_eq!(p.warning, None);
+    }
+
+    #[test]
+    fn one_file_without_side_letters_still_splits_at_the_flip() {
+        // A CD edition chosen for an LP rip: no side letters, so the flip is found as the longest
+        // long gap and the tracks are split around it by best fit.
+        let dir = tempfile::tempdir().unwrap();
+        let parts = [hiss(3.0), tone(30.0, 0.2), hiss(2.0), tone(40.0, 0.2), hiss(20.0), tone(30.0, 0.2), hiss(2.0), tone(25.0, 0.2), hiss(4.0)];
+        let rec = load(&[wav(dir.path(), "lp.wav", 8000, &parts)]).unwrap();
+        let r = candidate("m1", "LP", "Band", &[("A1", 30_000), ("A2", 40_000), ("B1", 30_000), ("B2", 25_000)]);
+        assert!(near(rec.music_ms(Some(&r)), 129_000), "{}", rec.music_ms(Some(&r)));
+        let p = plan(&rec, Some(&r), vec![], None);
+        assert!(near(p.tracks[2].start_ms, 94_700), "{:?}", spans(&p));
+        assert!(near(p.tracks[1].end_ms, 76_000), "{:?}", spans(&p));
+        // B1 starts the second side; every other cut is in a detected gap, none estimated.
+        assert_eq!(p.tracks.iter().map(|t| t.cut).collect::<Vec<_>>(), [CutKind::Start, CutKind::Gap, CutKind::Start, CutKind::Gap]);
         assert_eq!(p.warning, None);
     }
 
