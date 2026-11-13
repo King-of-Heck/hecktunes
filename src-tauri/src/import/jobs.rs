@@ -1,6 +1,6 @@
 use crate::identify::acoustid::KeyRejected;
 use crate::identify::net::is_network_failure;
-use crate::identify::{identify, rank, Identification, MetadataSource};
+use crate::identify::{identify, rank, rank_candidates, Identification, MetadataSource};
 use crate::import::apply::{pick_cover, stage};
 use crate::import::scan::{scan_paths, scan_paths_excluding, AlbumGroup};
 use crate::library::{paths, Library};
@@ -18,7 +18,12 @@ use std::thread;
 pub enum JobState {
     Queued,
     Identifying,
-    NeedsChoice { candidates: Vec<ReleaseCandidate> },
+    NeedsChoice {
+        candidates: Vec<ReleaseCandidate>,
+        /// The release the album being re-identified has now (None for a normal import).
+        #[serde(skip_serializing_if = "Option::is_none")]
+        current: Option<String>,
+    },
     Duplicate { release: ReleaseCandidate, existing_album_id: i64 },
     Importing,
     Done {
@@ -108,6 +113,8 @@ struct Job {
     group: AlbumGroup,
     /// Set when re-identifying an album already in the library.
     replace_album_id: Option<i64>,
+    /// MusicBrainz release the re-identified album has now.
+    current: Option<String>,
     candidates: Vec<ReleaseCandidate>,
     /// Release waiting on a Duplicate decision.
     chosen: Option<ReleaseCandidate>,
@@ -155,7 +162,7 @@ impl Worker {
                 let id = self.new_id();
                 let label = group.label();
                 self.emit(id, &label, JobState::Queued);
-                Job { id, label, group, replace_album_id: None, candidates: vec![], chosen: None }
+                Job { id, label, group, replace_album_id: None, current: None, candidates: vec![], chosen: None }
             })
             .collect();
         for job in jobs {
@@ -183,16 +190,19 @@ impl Worker {
             return;
         }
         let group = scan.groups.remove(0);
-        self.identify_job(Job { id, label, group, replace_album_id: Some(album_id), candidates: vec![], chosen: None });
+        self.identify_job(Job { id, label, group, replace_album_id: Some(album_id), current: album.mb_release_id.clone(), candidates: vec![], chosen: None });
     }
 
     fn identify_job(&mut self, mut job: Job) {
         self.emit(job.id, &job.label, JobState::Identifying);
+        if job.replace_album_id.is_some() {
+            return self.reidentify_job(job);
+        }
         match identify(&job.group.tracks, self.source.as_ref()) {
             Ok(Identification::Matched(release)) => self.proceed(job, release),
             Ok(Identification::Ambiguous(candidates)) => {
                 job.candidates = candidates.clone();
-                self.emit(job.id, &job.label, JobState::NeedsChoice { candidates });
+                self.emit(job.id, &job.label, JobState::NeedsChoice { candidates, current: None });
                 self.pending.insert(job.id, job);
             }
             // A user-requested re-identify must say why it failed rather than look like "nothing found".
@@ -206,6 +216,29 @@ impl Worker {
             }
             Ok(Identification::NotFound) => self.finish_unmatched(job, true, Some(NOTE_NOT_FOUND.into())),
         }
+    }
+
+    /// Fix metadata: always lets the user choose, even when one release is a confident match.
+    fn reidentify_job(&mut self, mut job: Job) {
+        let mut candidates = match rank_candidates(&job.group.tracks, self.source.as_ref()) {
+            Ok(c) => c,
+            // A user-requested re-identify must say why it failed rather than look like "nothing found".
+            Err(e) => return self.emit(job.id, &job.label, JobState::Failed { error: format!("{e:#}") }),
+        };
+        if candidates.is_empty() {
+            return self.finish_unmatched(job, true, None);
+        }
+        // The album's current release is always on offer, even if the search no longer finds it.
+        if let Some(cur) = job.current.clone() {
+            if !candidates.iter().any(|c| c.mbid == cur) {
+                if let Ok(release) = self.source.release(&cur) {
+                    candidates.push(release);
+                }
+            }
+        }
+        job.candidates = candidates.clone();
+        self.emit(job.id, &job.label, JobState::NeedsChoice { candidates, current: job.current.clone() });
+        self.pending.insert(job.id, job);
     }
 
     fn proceed(&mut self, mut job: Job, release: ReleaseCandidate) {
@@ -301,7 +334,7 @@ impl Worker {
                     .filter_map(|id| self.source.release(id).ok())
                     .collect();
                 job.candidates = rank(&job.group.tracks, found);
-                self.emit(job.id, &job.label, JobState::NeedsChoice { candidates: job.candidates.clone() });
+                self.emit(job.id, &job.label, JobState::NeedsChoice { candidates: job.candidates.clone(), current: job.current.clone() });
                 self.pending.insert(job.id, job);
             }
         }
@@ -417,7 +450,7 @@ mod tests {
         let last = ups.last().unwrap();
         let job_id = last.job_id;
         match &last.state {
-            JobState::NeedsChoice { candidates } => assert_eq!(candidates.len(), 2),
+            JobState::NeedsChoice { candidates, .. } => assert_eq!(candidates.len(), 2),
             other => panic!("expected NeedsChoice, got {other:?}"),
         }
         h.queue.send(Command::Resolve { job_id, choice: JobChoice::Pick { mbid: "b".into() } });
@@ -476,6 +509,7 @@ mod tests {
             let _ = tx.send(u);
         });
         q2.reimport(album.id);
+        pick_when_asked(&q2, &rx, "m9");
         let ups = until(&rx, is_terminal);
         assert!(matches!(ups.last().unwrap().state, JobState::Done { matched: true, .. }));
         let albums = h.lib.lock().unwrap().list_albums().unwrap();
@@ -635,6 +669,7 @@ mod tests {
             GateSource { inner: fake(&["m9"], vec![candidate("m9", "Album", "Band", &TL)]), reached: Mutex::new(tx) },
         );
         q2.reimport(x);
+        pick_when_asked(&q2, &rx2, "m9");
         reached.recv_timeout(Duration::from_secs(10)).expect("worker reached the cover lookup");
         // Same moment a concurrent update_album would hold the lock: the reimport must not be copying.
         let guard = h.lib.lock().unwrap();
@@ -684,6 +719,7 @@ mod tests {
         };
         let (q2, rx2) = start_queue(h.lib.clone(), fake(&["m9"], vec![candidate("m9", "Album", "Band", &TL)]));
         q2.reimport(x);
+        pick_when_asked(&q2, &rx2, "m9");
         let new_id = match until(&rx2, is_terminal).last().unwrap().state {
             JobState::Done { album_id, .. } => album_id,
             ref other => panic!("expected Done, got {other:?}"),
@@ -712,6 +748,7 @@ mod tests {
         };
 
         q2.reimport(x);
+        pick_when_asked(&q2, &rx2, "m1");
         let ups = until(&rx2, |s| matches!(s, JobState::Duplicate { .. }) || is_terminal(s));
         let last = ups.last().unwrap();
         assert!(
@@ -753,6 +790,7 @@ mod tests {
 
         let (q2, rx2) = start_queue(h.lib.clone(), fake(&["m9"], vec![candidate("m9", "Album", "Band", &TL)]));
         q2.reimport(x);
+        pick_when_asked(&q2, &rx2, "m9");
         let ups = until(&rx2, is_terminal);
         drop(guard);
         let new_id = match ups.last().unwrap().state {
@@ -822,7 +860,7 @@ mod tests {
         let first = until(&h.rx, is_terminal);
         let album_id = h.lib.lock().unwrap().list_albums().unwrap()[0].id;
         let id = h.queue.reimport(album_id);
-        let ups = until(&h.rx, is_terminal);
+        let ups = until(&h.rx, |s| matches!(s, JobState::NeedsChoice { .. }) || is_terminal(s));
         assert!(ups.len() > 1);
         assert!(ups.iter().all(|u| u.job_id == id), "all updates carry the returned id");
         assert!(first.iter().all(|u| u.job_id < id), "ids stay monotonic across import and reimport");
@@ -858,6 +896,127 @@ mod tests {
             other => panic!("expected Failed, got {other:?}"),
         }
         assert_eq!(h.lib.lock().unwrap().list_albums().unwrap().len(), 1);
+    }
+
+    /// Waits for a re-identify's NeedsChoice, then picks `mbid`. Returns the NeedsChoice update.
+    fn pick_when_asked(q: &ImportQueue, rx: &Receiver<JobUpdate>, mbid: &str) -> JobUpdate {
+        let last = until(rx, |s| matches!(s, JobState::NeedsChoice { .. }) || is_terminal(s)).pop().unwrap();
+        assert!(matches!(last.state, JobState::NeedsChoice { .. }), "expected NeedsChoice, got {:?}", last.state);
+        q.send(Command::Resolve { job_id: last.job_id, choice: JobChoice::Pick { mbid: mbid.into() } });
+        last
+    }
+
+    /// Imports the harness album matched to `mbid` (a confident match), returning its album id.
+    fn import_matched(h: &Harness) -> i64 {
+        h.queue.send(Command::Import(vec![h.src.clone()]));
+        match until(&h.rx, is_terminal).last().unwrap().state {
+            JobState::Done { album_id, matched: true, .. } => album_id,
+            ref other => panic!("expected matched Done, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn reidentify_with_a_single_confident_match_still_asks_and_marks_the_current_release() {
+        let h = harness(fake(&["m1"], vec![candidate("m1", "Album", "Band", &TL)]));
+        let x = import_matched(&h);
+        let id = h.queue.reimport(x);
+        let ups = until(&h.rx, |s| matches!(s, JobState::NeedsChoice { .. }) || is_terminal(s));
+        let last = ups.last().unwrap();
+        assert_eq!(last.job_id, id);
+        match &last.state {
+            JobState::NeedsChoice { candidates, current } => {
+                assert_eq!(candidates.iter().map(|c| c.mbid.as_str()).collect::<Vec<_>>(), ["m1"]);
+                assert_eq!(current.as_deref(), Some("m1"));
+            }
+            other => panic!("expected NeedsChoice, got {other:?}"),
+        }
+        h.queue.send(Command::Resolve { job_id: id, choice: JobChoice::Pick { mbid: "m1".into() } });
+        let done = until(&h.rx, is_terminal);
+        assert!(matches!(done.last().unwrap().state, JobState::Done { matched: true, .. }), "{:?}", done.last());
+        let albums = h.lib.lock().unwrap().list_albums().unwrap();
+        assert_eq!(albums.len(), 1);
+        assert_eq!(albums[0].mb_release_id.as_deref(), Some("m1"));
+    }
+
+    #[test]
+    fn reidentify_lists_candidates_best_first() {
+        let other = [("Uno", 1500), ("Dos", 2500)];
+        let h = harness(fake(&["m1"], vec![candidate("m1", "Album", "Band", &TL)]));
+        let x = import_matched(&h);
+        let (q2, rx2) = start_queue(
+            h.lib.clone(),
+            fake(&["b", "m1"], vec![candidate("b", "Album", "Band", &other), candidate("m1", "Album", "Band", &TL)]),
+        );
+        q2.reimport(x);
+        match until(&rx2, |s| matches!(s, JobState::NeedsChoice { .. }) || is_terminal(s)).last().unwrap().state.clone() {
+            JobState::NeedsChoice { candidates, .. } => assert_eq!(candidates[0].mbid, "m1"),
+            other => panic!("expected NeedsChoice, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn reidentify_appends_the_current_release_when_the_search_misses_it() {
+        let h = harness(fake(&["m1"], vec![candidate("m1", "Album", "Band", &TL)]));
+        let x = import_matched(&h);
+        // The source still knows m1 but this search only finds m2.
+        let (q2, rx2) = start_queue(
+            h.lib.clone(),
+            fake(&["m2"], vec![candidate("m2", "Album", "Band", &TL), candidate("m1", "Album", "Band", &TL)]),
+        );
+        q2.reimport(x);
+        match until(&rx2, |s| matches!(s, JobState::NeedsChoice { .. }) || is_terminal(s)).last().unwrap().state.clone() {
+            JobState::NeedsChoice { candidates, current } => {
+                assert_eq!(candidates.iter().map(|c| c.mbid.as_str()).collect::<Vec<_>>(), ["m2", "m1"]);
+                assert_eq!(current.as_deref(), Some("m1"));
+            }
+            other => panic!("expected NeedsChoice, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn reidentify_still_asks_when_the_current_release_cannot_be_fetched() {
+        let h = harness(fake(&["m1"], vec![candidate("m1", "Album", "Band", &TL)]));
+        let x = import_matched(&h);
+        let (q2, rx2) = start_queue(h.lib.clone(), fake(&["m2"], vec![candidate("m2", "Album", "Band", &TL)]));
+        q2.reimport(x);
+        match until(&rx2, |s| matches!(s, JobState::NeedsChoice { .. }) || is_terminal(s)).last().unwrap().state.clone() {
+            JobState::NeedsChoice { candidates, current } => {
+                assert_eq!(candidates.len(), 1);
+                assert_eq!(current.as_deref(), Some("m1"));
+            }
+            other => panic!("expected NeedsChoice, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn reidentify_keep_current_tags_leaves_the_album_alone() {
+        let h = harness(fake(&["m1"], vec![candidate("m1", "Album", "Band", &TL)]));
+        let x = import_matched(&h);
+        let id = h.queue.reimport(x);
+        until(&h.rx, |s| matches!(s, JobState::NeedsChoice { .. }));
+        h.queue.send(Command::Resolve { job_id: id, choice: JobChoice::KeepExisting });
+        assert!(matches!(until(&h.rx, is_terminal).last().unwrap().state, JobState::Skipped));
+        let albums = h.lib.lock().unwrap().list_albums().unwrap();
+        assert_eq!(albums.iter().map(|a| a.id).collect::<Vec<_>>(), [x]);
+    }
+
+    #[test]
+    fn reidentify_with_nothing_found_is_skipped() {
+        let h = harness(fake(&[], vec![]));
+        let x = import_unmatched(&h);
+        h.queue.reimport(x);
+        assert!(matches!(until(&h.rx, is_terminal).last().unwrap().state, JobState::Skipped));
+    }
+
+    #[test]
+    fn normal_import_has_no_current_release_and_a_confident_match_still_auto_applies() {
+        let h = harness(fake(&["m1"], vec![candidate("m1", "Album", "Band", &TL)]));
+        h.queue.send(Command::Import(vec![h.src.clone()]));
+        let ups = until(&h.rx, is_terminal);
+        assert!(matches!(ups.last().unwrap().state, JobState::Done { matched: true, .. }));
+        assert!(!ups.iter().any(|u| matches!(u.state, JobState::NeedsChoice { .. })));
+        let v = serde_json::to_value(JobState::NeedsChoice { candidates: vec![], current: None }).unwrap();
+        assert!(v.get("current").is_none());
     }
 
     #[test]

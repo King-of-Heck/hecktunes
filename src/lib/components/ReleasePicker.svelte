@@ -49,7 +49,7 @@
           <li>
             <img src={`https://coverartarchive.org/release/${c.mbid}/front-250`} alt="" onerror={(e) => ((e.currentTarget as HTMLImageElement).style.visibility = 'hidden')} />
             <div class="info">
-              <strong>{c.title}</strong>
+              <strong>{c.title}{#if job.current === c.mbid} <span class="badge">Current</span>{/if}</strong>
               <span>{c.artist}</span>
               <span class="muted">{[c.date, c.country, c.format, `${c.tracks.length} tracks`, totalLength(c)].filter(Boolean).join(' · ')}</span>
               <button class="link" onclick={() => (expanded = expanded === c.mbid ? null : c.mbid)}>{expanded === c.mbid ? 'Hide tracks' : 'Show tracks'}</button>
@@ -66,7 +66,7 @@
       {#if syncing}<p class="note">Waiting for the Echo Mini sync to finish before changing your library.</p>{/if}
       <div class="footer">
         <button onclick={() => choose({ kind: 'skip' })} disabled={busy}>Don't import</button>
-        <button onclick={() => choose({ kind: 'keep_existing' })} disabled={busy || syncing}>Keep existing tags</button>
+        <button onclick={() => choose({ kind: 'keep_existing' })} disabled={busy || syncing}>{job.current ? 'Keep current tags' : 'Keep existing tags'}</button>
       </div>
     {/if}
   </div>
@@ -84,6 +84,7 @@
   .muted { color: var(--muted); font-size: 12px; }
   .link { border: none; background: none; color: var(--accent); padding: 0; text-align: left; font-size: 12px; }
   ol { margin: 6px 0 0; padding-left: 20px; font-size: 12px; }
+  .badge { margin-left: 6px; padding: 1px 6px; border-radius: 8px; background: var(--accent); color: #fff; font-size: 11px; font-weight: 600; vertical-align: 1px; }
   .note { color: var(--muted); font-size: 13px; }
   .footer { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
 </style>

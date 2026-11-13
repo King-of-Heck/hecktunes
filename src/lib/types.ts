@@ -69,7 +69,7 @@ export interface ReleaseCandidate {
 export type JobState =
   | { state: 'queued' }
   | { state: 'identifying' }
-  | { state: 'needs_choice'; candidates: ReleaseCandidate[] }
+  | { state: 'needs_choice'; candidates: ReleaseCandidate[]; current?: string }
   | { state: 'duplicate'; release: ReleaseCandidate; existing_album_id: number }
   | { state: 'importing' }
   | { state: 'done'; album_id: number; matched: boolean; note?: string }

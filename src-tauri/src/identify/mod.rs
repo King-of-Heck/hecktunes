@@ -35,7 +35,9 @@ pub fn rank(tracks: &[SourceTrack], candidates: Vec<ReleaseCandidate>) -> Vec<Re
     scored.into_iter().map(|(_, c)| c).collect()
 }
 
-pub fn identify(tracks: &[SourceTrack], source: &dyn MetadataSource) -> Result<Identification> {
+/// Looks the album up (tag search, else fingerprints) and returns up to MAX_CANDIDATES releases, best first.
+/// Empty when nothing was found; Err when nothing was found because lookups failed.
+pub fn rank_candidates(tracks: &[SourceTrack], source: &dyn MetadataSource) -> Result<Vec<ReleaseCandidate>> {
     let ev = AlbumEvidence::from_tracks(tracks);
     let mut last_err: Option<anyhow::Error> = None;
     let mut ids: Vec<String> = Vec::new();
@@ -87,10 +89,18 @@ pub fn identify(tracks: &[SourceTrack], source: &dyn MetadataSource) -> Result<I
     if candidates.is_empty() {
         return match last_err {
             Some(e) => Err(e),
-            None => Ok(Identification::NotFound),
+            None => Ok(vec![]),
         };
     }
-    let ranked = rank(tracks, candidates);
+    Ok(rank(tracks, candidates))
+}
+
+pub fn identify(tracks: &[SourceTrack], source: &dyn MetadataSource) -> Result<Identification> {
+    let ranked = rank_candidates(tracks, source)?;
+    if ranked.is_empty() {
+        return Ok(Identification::NotFound);
+    }
+    let ev = AlbumEvidence::from_tracks(tracks);
     let scores: Vec<f64> = ranked.iter().map(|c| score(&ev, c)).collect();
     Ok(match decide(&ranked, &scores) {
         Decision::Auto(i) => Identification::Matched(ranked[i].clone()),
@@ -380,6 +390,47 @@ mod tests {
         let fake = FakeSource { releases: vec![], search_ids: vec![] };
         let tracks = [src(None, None, None, 100_000)];
         assert!(matches!(identify(&tracks, &fake).unwrap(), Identification::NotFound));
+    }
+
+    #[test]
+    fn rank_candidates_returns_the_ranked_list_even_for_a_confident_match() {
+        let other = [("Uno", 100_500), ("Dos", 199_000)];
+        let tracks = [src(None, Some("Album"), Some("Band"), 100_000), src(None, Some("Album"), Some("Band"), 200_000)];
+        let fake = FakeSource {
+            releases: vec![candidate("b", "Album", "Band", &other), candidate("a", "Album", "Band", &TL)],
+            search_ids: vec!["b".into(), "a".into()],
+        };
+        let ranked = rank_candidates(&tracks, &fake).unwrap();
+        assert_eq!(ranked.iter().map(|c| c.mbid.as_str()).collect::<Vec<_>>(), ["a", "b"]);
+
+        let (tracks, release) = matching_tracks_and_release();
+        let fake = FakeSource { releases: vec![release], search_ids: vec!["a".into()] };
+        assert!(matches!(identify(&tracks, &fake).unwrap(), Identification::Matched(_)));
+        let ranked = rank_candidates(&tracks, &fake).unwrap();
+        assert_eq!(ranked.len(), 1);
+        assert_eq!(ranked[0].mbid, "a");
+    }
+
+    #[test]
+    fn rank_candidates_is_empty_when_nothing_is_found_and_errs_when_lookups_failed() {
+        let (tracks, release_a) = matching_tracks_and_release();
+        let none = Failing {
+            inner: FakeSource { releases: vec![], search_ids: vec![] },
+            search_fails: false,
+            fingerprint_ids: vec![],
+            fingerprint_fails: false,
+            release_fails: false,
+        };
+        assert!(rank_candidates(&tracks, &none).unwrap().is_empty());
+        let failed = Failing {
+            inner: FakeSource { releases: vec![release_a], search_ids: vec!["a".into()] },
+            search_fails: false,
+            fingerprint_ids: vec![],
+            fingerprint_fails: false,
+            release_fails: true,
+        };
+        let err = rank_candidates(&tracks, &failed).unwrap_err();
+        assert!(format!("{err:#}").contains("release offline"));
     }
 
     #[test]
