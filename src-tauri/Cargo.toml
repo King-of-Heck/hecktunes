@@ -1,6 +1,6 @@
 [package]
 name = "hecktunes"
-version = "0.2.0"
+version = "0.3.0"
 description = "Music library and Echo Mini sync"
 authors = ["HeckTunes contributors"]
 edition = "2024"
