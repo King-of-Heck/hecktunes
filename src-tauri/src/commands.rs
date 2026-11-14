@@ -85,7 +85,18 @@ fn err(e: impl std::fmt::Display) -> String {
 
 #[tauri::command(async)]
 pub fn list_albums(state: State<AppState>) -> CmdResult<Vec<AlbumRow>> {
-    state.lib.lock().unwrap().list_albums().map_err(err)
+    let albums = state.lib.lock().unwrap().list_albums().map_err(err);
+    match &albums {
+        Ok(a) => crate::diag::log(&format!("list_albums: {} albums", a.len())),
+        Err(e) => crate::diag::log(&format!("list_albums failed: {e}")),
+    }
+    albums
+}
+
+/// Records a problem the window noticed (a slow or failed load, a script error) in the diagnostic log.
+#[tauri::command]
+pub fn log_problem(message: String) {
+    crate::diag::log(&format!("window: {}", message.chars().take(2000).collect::<String>()));
 }
 
 #[tauri::command(async)]

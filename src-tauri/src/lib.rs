@@ -1,6 +1,7 @@
 pub mod about;
 pub mod artwork;
 pub mod commands;
+pub mod diag;
 pub mod device;
 pub mod identify;
 pub mod import;
@@ -34,6 +35,9 @@ pub fn run() {
             let default_root = app.path().audio_dir()?.join("HeckTunes");
             let data_dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&data_dir)?;
+            diag::init(&data_dir);
+            let setup_started = std::time::Instant::now();
+            diag::log(&format!("start-up: HeckTunes {}", env!("CARGO_PKG_VERSION")));
             let db_path = data_dir.join("library.db");
             // The folder the library database last recorded: the fallback when settings.json
             // is damaged or gone.
@@ -89,11 +93,19 @@ pub fn run() {
                 },
             );
             let settings = commands::SettingsState { config_dir, default_root, active_root, startup, in_effect, key_active };
+            let album_count = lib.lock().unwrap().list_albums().map(|a| a.len().to_string()).unwrap_or_else(|e| format!("error: {e:#}"));
+            diag::log(&format!(
+                "start-up done in {} ms: library {} (available: {}), albums: {album_count}",
+                setup_started.elapsed().as_millis(),
+                settings.active_root.display(),
+                choice.available
+            ));
             app.manage(AppState { lib, queue, sync, player, settings, library_available: choice.available, vinyl_tmp, preview_lock: Default::default() });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             commands::list_albums,
+            commands::log_problem,
             commands::album_tracks,
             commands::import_paths,
             commands::import_vinyl,

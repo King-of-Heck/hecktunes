@@ -22,6 +22,7 @@ import type {
 } from './types';
 
 export const listAlbums = () => invoke<AlbumRow[]>('list_albums');
+export const logProblem = (message: string) => invoke<void>('log_problem', { message });
 export const albumTracks = (albumId: number) => invoke<TrackRow[]>('album_tracks', { albumId });
 export const importPaths = (paths: string[]) => invoke<void>('import_paths', { paths });
 export const importVinyl = (paths: string[]) => invoke<void>('import_vinyl', { paths });

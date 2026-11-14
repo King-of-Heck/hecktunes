@@ -71,14 +71,24 @@
   // Why the library or playlists couldn't be loaded, shown in a banner instead of an empty library.
   let loadError = $state<string | null>(null);
 
+  // A library load that hasn't answered by then gets a banner (and a log line) instead of a silent empty grid.
+  const SLOW_LOAD_MS = 5000;
+
   async function refresh() {
+    const slow = setTimeout(() => {
+      loadError = "Your library hasn't loaded yet.";
+      api.logProblem(`list_albums has not answered after ${SLOW_LOAD_MS} ms`).catch(() => {});
+    }, SLOW_LOAD_MS);
     try {
       albums = await api.listAlbums();
       loadError = null;
     } catch (e) {
       console.error('refresh failed', e);
       loadError = `Couldn't load your library: ${e}`;
+      api.logProblem(`list_albums failed: ${e}`).catch(() => {});
       return;
+    } finally {
+      clearTimeout(slow);
     }
     bust++;
     songsVersion++;
@@ -180,6 +190,9 @@
   }
 
   onMount(() => {
+    const report = (what: string) => api.logProblem(what).catch(() => {});
+    window.addEventListener('error', (e) => report(`script error: ${e.message} at ${e.filename}:${e.lineno}`));
+    window.addEventListener('unhandledrejection', (e) => report(`unhandled rejection: ${e.reason}`));
     refresh().catch(logError('refresh failed'));
     refreshPlaylists().catch(logError('playlists failed'));
     api
