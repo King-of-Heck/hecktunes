@@ -18,13 +18,20 @@ function hostTriple() {
 }
 const target = at >= 0 ? args[at + 1] : hostTriple();
 
-/** Licence-ish files at the top of a package folder. */
+/** Licence-ish files at the top of a package folder, including the files of a REUSE-style
+ *  `LICENSES/` folder (e.g. crc-catalog, enum-map). */
 function licenceTexts(dir) {
   if (!existsSync(dir)) return [];
-  return readdirSync(dir)
-    .filter((f) => /^(licen[cs]e|copying|notice)/i.test(f))
-    .sort()
-    .map((f) => readFileSync(join(dir, f), 'utf8').replace(/\r\n/g, '\n').trim())
+  const read = (p) => readFileSync(p, 'utf8').replace(/\r\n/g, '\n').trim();
+  return readdirSync(dir, { withFileTypes: true })
+    .filter((e) => /^(licen[cs]e|copying|notice)/i.test(e.name))
+    .sort((a, b) => a.name.localeCompare(b.name))
+    .flatMap((e) => {
+      const p = join(dir, e.name);
+      if (e.isFile()) return [read(p)];
+      if (e.isDirectory()) return readdirSync(p, { withFileTypes: true }).filter((f) => f.isFile()).map((f) => f.name).sort().map((f) => read(join(p, f)));
+      return [];
+    })
     .filter(Boolean);
 }
 
