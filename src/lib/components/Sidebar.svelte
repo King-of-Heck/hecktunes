@@ -7,7 +7,6 @@
     syncing,
     onSelect,
     onCreatePlaylist,
-    onImportVinyl,
   }: {
     view: View;
     needsCount: number;
@@ -15,7 +14,6 @@
     syncing: boolean;
     onSelect: (v: View) => void;
     onCreatePlaylist: (name: string) => Promise<void>;
-    onImportVinyl: () => void;
   } = $props();
 
   let naming = $state(false);
@@ -42,10 +40,11 @@
   <button class:active={is('albums')} onclick={() => onSelect({ kind: 'albums' })}>Albums</button>
   <button class:active={is('artists')} onclick={() => onSelect({ kind: 'artists' })}>Artists</button>
   <button class:active={is('songs')} onclick={() => onSelect({ kind: 'songs' })}>Songs</button>
-  <button class:active={is('needs_metadata')} onclick={() => onSelect({ kind: 'needs_metadata' })}>
-    Needs metadata {#if needsCount > 0}<span class="badge">{needsCount}</span>{/if}
-  </button>
-  <button class="new" onclick={onImportVinyl}>+ Import vinyl recording…</button>
+  {#if needsCount > 0}
+    <button class:active={is('needs_metadata')} onclick={() => onSelect({ kind: 'needs_metadata' })}>
+      Needs metadata <span class="badge">{needsCount}</span>
+    </button>
+  {/if}
 
   <p class="section">Playlists</p>
   {#each playlists as p (p.id)}
@@ -63,11 +62,12 @@
     <button class="new" onclick={() => { naming = true; error = null; }}>+ New playlist</button>
   {/if}
 
-  <p class="section">Device</p>
+  <p class="section">Devices</p>
   <button class:active={is('device')} onclick={() => onSelect({ kind: 'device' })}>
-    Echo Mini {#if syncing}<span class="badge sync">syncing</span>{/if}
+    HeckPod {#if syncing}<span class="badge sync">syncing</span>{/if}
   </button>
   <div class="spacer"></div>
+  <button class:active={is('tools')} onclick={() => onSelect({ kind: 'tools' })}>Tools</button>
   <button class:active={is('settings')} onclick={() => onSelect({ kind: 'settings' })}>Settings</button>
   <button class:active={is('about')} onclick={() => onSelect({ kind: 'about' })}>About</button>
 </nav>

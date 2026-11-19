@@ -50,3 +50,5 @@ input {
   padding: 5px 8px;
   width: 100%;
 }
+input[type='checkbox'],
+input[type='radio'] { width: auto; padding: 0; margin: 0; accent-color: var(--accent); }

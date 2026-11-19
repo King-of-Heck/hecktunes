@@ -1,14 +1,21 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import * as api from '../api';
-  import { formatBytes } from '../api';
+  import { coverUrl, formatBytes } from '../api';
   import type { AlbumRow, PlanSummary, PlaylistRow, Selection, SelectionKind, SyncEvent, Volume } from '../types';
   let {
     albums,
     playlists,
+    bust = 0,
     syncEvent,
     onClearResult,
-  }: { albums: AlbumRow[]; playlists: PlaylistRow[]; syncEvent: SyncEvent | null; onClearResult: () => void } = $props();
+  }: {
+    albums: AlbumRow[];
+    playlists: PlaylistRow[];
+    bust?: number;
+    syncEvent: SyncEvent | null;
+    onClearResult: () => void;
+  } = $props();
 
   let volumes = $state<Volume[]>([]);
   let card = $state<string | null>(null);
@@ -29,8 +36,15 @@
     for (const a of albums) map.set(a.album_artist, [...(map.get(a.album_artist) ?? []), a]);
     return [...map.entries()]
       .sort(([x], [y]) => x.localeCompare(y, undefined, { sensitivity: 'base' }))
-      .map(([name, list]) => ({ name, albums: list }));
+      .map(([name, list]) => ({
+        name,
+        albums: [...list].sort((x, y) => (x.year ?? '9999').localeCompare(y.year ?? '9999') || x.title.localeCompare(y.title)),
+        cover: list.find((a) => a.cover_path)?.cover_path ?? null,
+      }));
   });
+  // How many of an artist's albums will be on the card.
+  const onCard = (a: { name: string; albums: AlbumRow[] }) =>
+    hasArtist(a.name) ? a.albums.length : a.albums.filter((al) => hasAlbum(al.id)).length;
 
   const hasAlbum = (id: number) => selection.albums.includes(id);
   const hasArtist = (name: string) => selection.artists.includes(name);
@@ -118,12 +132,12 @@
 </script>
 
 <div class="sync">
-  <h2>Echo Mini</h2>
+  <h2>HeckPod</h2>
 
   <section>
     <div class="row">
       <select bind:value={card} disabled={running}>
-        <option value={null}>Choose the Echo Mini's microSD card…</option>
+        <option value={null}>Choose the HeckPod's microSD card…</option>
         {#each volumes as v (v.root)}
           <option value={v.root} disabled={v.player_internal}>
             {v.label || 'Untitled'} ({v.root}) · {formatBytes(v.available)} free{v.hecktunes_card ? ' · synced before' : ''}{v.player_internal ? " · player's own storage" : ''}
@@ -134,7 +148,7 @@
     </div>
     {#if volumeError}<p class="err">{volumeError}</p>{/if}
     {#if volumes.length === 0}
-      <p class="meta">No cards found. Put the microSD card in a card reader (or connect the Echo Mini), then press Refresh.</p>
+      <p class="meta">No cards found. Put the microSD card in a card reader (or connect the HeckPod), then press Refresh.</p>
     {/if}
     {#if selectedVolume?.last_synced}
       <p class="meta">Last synced {new Date(selectedVolume.last_synced * 1000).toLocaleString()}</p>
@@ -142,45 +156,76 @@
   </section>
 
   <section>
-    <h3>What goes on the Echo Mini</h3>
+    <h3>What goes on the HeckPod</h3>
     {#if playlists.length > 0}
       <h4>Playlists</h4>
-      {#each playlists as p (p.id)}
-        <label class="tick">
-          <input type="checkbox" checked={hasPlaylist(p.id)} disabled={running} onchange={(e) => toggle('playlist', String(p.id), e.currentTarget.checked)} />
-          {p.name} <span class="sub">{p.track_count} songs</span>
-        </label>
-      {/each}
+      <div class="list">
+        {#each playlists as p (p.id)}
+          <label class="item">
+            <input type="checkbox" checked={hasPlaylist(p.id)} disabled={running} onchange={(e) => toggle('playlist', String(p.id), e.currentTarget.checked)} />
+            <div class="thumb square noart">♫</div>
+            <div class="text">
+              <span class="name">{p.name}</span>
+              <span class="sub">{p.track_count} {p.track_count === 1 ? 'song' : 'songs'}</span>
+            </div>
+          </label>
+        {/each}
+      </div>
     {/if}
     <h4>Artists and albums</h4>
-    {#each artists as a (a.name)}
-      <div class="artist">
-        <label class="tick">
-          <input type="checkbox" checked={hasArtist(a.name)} disabled={running} onchange={(e) => toggle('artist', a.name, e.currentTarget.checked)} />
-          <strong>{a.name}</strong>
-        </label>
-        <button class="twisty" onclick={() => (expanded[a.name] = !expanded[a.name])}>
-          {expanded[a.name] ? 'Hide albums' : `${a.albums.length} ${a.albums.length === 1 ? 'album' : 'albums'}`}
-        </button>
-        {#if expanded[a.name]}
-          {#each a.albums as al (al.id)}
-            <label class="tick album">
-              <input
-                type="checkbox"
-                checked={hasArtist(a.name) || hasAlbum(al.id)}
-                disabled={running || hasArtist(a.name)}
-                onchange={(e) => toggle('album', String(al.id), e.currentTarget.checked)}
-              />
-              {al.title}{al.year ? ` (${al.year})` : ''}
-            </label>
-          {/each}
-        {/if}
-      </div>
-    {:else}
-      <p class="meta">Your library is empty.</p>
-    {/each}
+    <div class="list">
+      {#each artists as a (a.name)}
+        {@const whole = hasArtist(a.name)}
+        {@const n = onCard(a)}
+        <div class="artist" class:open={expanded[a.name]}>
+          <div class="item">
+            <input
+              type="checkbox"
+              checked={whole}
+              indeterminate={!whole && n > 0}
+              disabled={running}
+              aria-label={`All of ${a.name}`}
+              onchange={(e) => toggle('artist', a.name, e.currentTarget.checked)}
+            />
+            <button class="expand" onclick={() => (expanded[a.name] = !expanded[a.name])} aria-expanded={!!expanded[a.name]}>
+              {#if a.cover}<img class="thumb round" src={coverUrl(a.cover, bust)} alt="" loading="lazy" />{:else}<div class="thumb round noart">♪</div>{/if}
+              <div class="text">
+                <span class="name">{a.name}</span>
+                <span class="sub">
+                  {a.albums.length} {a.albums.length === 1 ? 'album' : 'albums'}{whole ? ' · all, including future albums' : n > 0 ? ` · ${n} selected` : ''}
+                </span>
+              </div>
+              <span class="chev" aria-hidden="true">›</span>
+            </button>
+          </div>
+          {#if expanded[a.name]}
+            <div class="albums">
+              {#each a.albums as al (al.id)}
+                <label class="album" class:on={whole || hasAlbum(al.id)} class:locked={whole}>
+                  {#if al.cover_path}<img src={coverUrl(al.cover_path, bust)} alt="" loading="lazy" />{:else}<div class="noart">♪</div>{/if}
+                  <div class="text">
+                    <span class="name">{al.title}</span>
+                    <span class="sub">{[al.year, `${al.track_count} ${al.track_count === 1 ? 'song' : 'songs'}`].filter(Boolean).join(' · ')}</span>
+                  </div>
+                  <input
+                    type="checkbox"
+                    checked={whole || hasAlbum(al.id)}
+                    disabled={running || whole}
+                    title={whole ? `Included because all of ${a.name} is ticked` : undefined}
+                    onchange={(e) => toggle('album', String(al.id), e.currentTarget.checked)}
+                  />
+                </label>
+              {/each}
+            </div>
+          {/if}
+        </div>
+      {:else}
+        <p class="meta">Your library is empty.</p>
+      {/each}
+    </div>
   </section>
 
+  {#if previewError || actionError || (summary && !running)}
   <section>
     {#if previewError}<p class="err">{previewError}</p>{/if}
     {#if summary && !running}
@@ -198,6 +243,7 @@
     {/if}
     {#if actionError}<p class="err">{actionError}</p>{/if}
   </section>
+  {/if}
 
   {#if syncEvent}
     <section class="status">
@@ -220,17 +266,17 @@
         {#each o.warnings as w}<p class="warn">{w}</p>{/each}
         {#each syncEvent.warnings as w}<p class="warn">{w}</p>{/each}
         {#if echo?.status === 'done'}
-          <p class="ok">The player's library is ready, so the Echo Mini won't need to rescan the card.</p>
+          <p class="ok">The player's library is ready, so the HeckPod won't need to rescan the card.</p>
         {:else if echo?.status === 'failed' && echo.code === null && echo.log.startsWith('cancelled')}
-          <p class="warn">You stopped echo-sync. The Echo Mini will rescan the card on its own.</p>
+          <p class="warn">You stopped echo-sync. The HeckPod will rescan the card on its own.</p>
         {:else if echo?.status === 'failed' && echo.code === null && echo.log.startsWith('timed out')}
-          <p class="warn">echo-sync took too long and was stopped. The Echo Mini will rescan the card on its own.</p>
+          <p class="warn">echo-sync took too long and was stopped. The HeckPod will rescan the card on its own.</p>
           <pre>{echo.log}</pre>
         {:else if echo?.status === 'failed'}
-          <p class="warn">echo-sync failed (exit code {echo.code ?? '?'}). The Echo Mini will rescan the card on its own.</p>
+          <p class="warn">echo-sync failed (exit code {echo.code ?? '?'}). The HeckPod will rescan the card on its own.</p>
           <pre>{echo.log}</pre>
         {:else if echo?.status === 'missing'}
-          <p class="warn">echo-sync didn't run: {echo.reason}. The Echo Mini will rescan the card on its own.</p>
+          <p class="warn">echo-sync didn't run: {echo.reason}. The HeckPod will rescan the card on its own.</p>
         {/if}
         {#if !o.cancelled}<p class="meta">Eject the card safely before removing it.</p>{/if}
       {:else if syncEvent.state === 'failed'}
@@ -241,17 +287,44 @@
 </div>
 
 <style>
-  .sync { padding: 16px 24px; max-width: 820px; }
+  .sync { padding: 16px 24px; }
   h2 { margin: 0 0 12px; font-size: 24px; }
   h3 { margin: 0 0 8px; font-size: 16px; }
   h4 { margin: 12px 0 4px; font-size: 12px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); }
   section { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); padding: 12px 16px; margin-bottom: 14px; }
   .row { display: flex; gap: 8px; }
   select { flex: 1; min-width: 0; }
-  .tick { display: flex; gap: 8px; align-items: center; padding: 3px 0; }
-  .tick.album { padding-left: 26px; }
-  .artist { border-bottom: 1px solid var(--border); padding: 4px 0; }
-  .twisty { border: none; background: none; color: var(--muted); padding: 0 0 0 26px; font-size: 12px; }
+  .list { display: flex; flex-direction: column; }
+  .item { display: flex; align-items: center; gap: 12px; padding: 6px 4px; border-bottom: 1px solid var(--border); }
+  .list > .item:last-child, .list > .artist:last-child > .item { border-bottom: none; }
+  .artist.open > .item { border-bottom: none; }
+  .expand {
+    flex: 1; min-width: 0; display: flex; align-items: center; gap: 12px;
+    border: none; background: none; padding: 2px 4px; border-radius: 6px; text-align: left;
+  }
+  .expand:hover { background: var(--bg); }
+  .thumb { width: 40px; height: 40px; flex: none; object-fit: cover; background: var(--bg); }
+  .thumb.round { border-radius: 50%; }
+  .thumb.square { border-radius: 6px; }
+  .noart { display: grid; place-items: center; color: var(--muted); background: var(--bg); }
+  .text { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+  .name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .chev { color: var(--muted); font-size: 20px; line-height: 1; transition: transform 0.15s; }
+  .open .chev { transform: rotate(90deg); }
+  .albums {
+    display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 8px;
+    padding: 4px 4px 12px 30px; border-bottom: 1px solid var(--border);
+  }
+  .artist:last-child .albums { border-bottom: none; }
+  .album {
+    display: flex; align-items: center; gap: 10px; padding: 6px; cursor: pointer;
+    border: 1px solid var(--border); border-radius: var(--radius); background: var(--panel);
+  }
+  .album:hover { border-color: var(--muted); }
+  .album.on { border-color: var(--accent); }
+  .album.locked { cursor: default; }
+  .album img, .album .noart { width: 52px; height: 52px; flex: none; border-radius: 6px; object-fit: cover; }
+  .album .name { font-weight: 500; }
   .sub, .meta { color: var(--muted); font-size: 13px; }
   .err { color: var(--danger); }
   .warn { color: var(--warn); }

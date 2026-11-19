@@ -18,6 +18,7 @@
   import DropOverlay from './lib/components/DropOverlay.svelte';
   import ImportTray from './lib/components/ImportTray.svelte';
   import AboutView from './lib/components/AboutView.svelte';
+  import ToolsView from './lib/components/ToolsView.svelte';
   import SettingsPage from './lib/components/SettingsView.svelte';
 
   let view = $state<View>({ kind: 'albums' });
@@ -45,6 +46,10 @@
   );
   $effect(() => {
     if (artistName !== null && albums.length > 0 && !albums.some((a) => a.album_artist === artistName)) view = { kind: 'artists' };
+  });
+  // The Needs metadata item disappears once it's empty, so don't leave the user on an empty page.
+  $effect(() => {
+    if (view.kind === 'needs_metadata' && needs.length === 0 && albums.length > 0) view = { kind: 'albums' };
   });
   const selected = $derived(albums.find((a) => a.id === selectedId) ?? null);
   const jobList = $derived(Object.values(jobs).sort((a, b) => b.job_id - a.job_id));
@@ -214,7 +219,7 @@
 
 <div class="app">
 <div class="layout">
-  <Sidebar {view} needsCount={needs.length} {playlists} {syncing} onSelect={select} onCreatePlaylist={createPlaylist} onImportVinyl={importVinyl} />
+  <Sidebar {view} needsCount={needs.length} {playlists} {syncing} onSelect={select} onCreatePlaylist={createPlaylist} />
   <main>
     {#if loadError}
       <p class="banner error">{loadError} <button class="link" onclick={retryLoad}>Try again</button></p>
@@ -265,7 +270,9 @@
         {/key}
       {/if}
     {:else if view.kind === 'device'}
-      <SyncPanel {albums} {playlists} {syncEvent} onClearResult={() => (syncEvent = null)} />
+      <SyncPanel {albums} {playlists} {bust} {syncEvent} onClearResult={() => (syncEvent = null)} />
+    {:else if view.kind === 'tools'}
+      <ToolsView onImportVinyl={importVinyl} />
     {:else if view.kind === 'settings'}
       <SettingsPage />
     {:else if view.kind === 'about'}

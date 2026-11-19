@@ -93,7 +93,7 @@
         <AddToPlaylist trackIds={tracks.map((t) => t.id)} {playlists} {onPlaylistsChanged} label="Add to playlist" />
         {#if !confirming}<button onclick={() => (confirming = true)} disabled={syncing}>Remove from library</button>{/if}
       </div>
-      {#if syncing}<p class="meta">Editing and removing are paused while the Echo Mini sync runs.</p>{/if}
+      {#if syncing}<p class="meta">Editing and removing are paused while the HeckPod sync runs.</p>{/if}
       {#if confirming}
         <p class="confirm">
           Remove this album and delete its files from the library folder? Your original files aren't touched.

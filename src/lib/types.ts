@@ -203,6 +203,7 @@ export type View =
   | { kind: 'needs_metadata' }
   | { kind: 'playlist'; id: number }
   | { kind: 'device' }
+  | { kind: 'tools' }
   | { kind: 'settings' }
   | { kind: 'about' };
 

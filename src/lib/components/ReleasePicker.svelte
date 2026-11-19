@@ -33,7 +33,7 @@
     {#if job.state === 'duplicate'}
       <h3 id="picker-title">Already in your library</h3>
       <p><strong>{job.release.artist} – {job.release.title}</strong> ({job.release.date ?? 'unknown year'}) is already in your library.</p>
-      {#if syncing}<p class="note">Waiting for the Echo Mini sync to finish before changing your library.</p>{/if}
+      {#if syncing}<p class="note">Waiting for the HeckPod sync to finish before changing your library.</p>{/if}
       <div class="footer">
         <button onclick={() => choose({ kind: 'skip' })} disabled={busy}>Skip</button>
         <button class="primary" onclick={() => choose({ kind: 'replace' })} disabled={busy || syncing}>Replace existing</button>
@@ -63,7 +63,7 @@
           <li class="muted">No releases found. Try a different search.</li>
         {/each}
       </ul>
-      {#if syncing}<p class="note">Waiting for the Echo Mini sync to finish before changing your library.</p>{/if}
+      {#if syncing}<p class="note">Waiting for the HeckPod sync to finish before changing your library.</p>{/if}
       <div class="footer">
         <button onclick={() => choose({ kind: 'skip' })} disabled={busy}>Don't import</button>
         <button onclick={() => choose({ kind: 'keep_existing' })} disabled={busy || syncing}>{job.current ? 'Keep current tags' : 'Keep existing tags'}</button>
