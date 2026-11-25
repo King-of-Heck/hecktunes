@@ -18,8 +18,34 @@ jobs:
           node-version: 24
       - run: node scripts/check-version.mjs "${{ github.ref_name }}"
 
-  build:
+  # One job makes the draft release and every build uploads into it by id. If each matrix leg
+  # let tauri-action find-or-create the release, legs starting together could each create one.
+  create-release:
     needs: check-version
+    runs-on: ubuntu-latest
+    outputs:
+      id: ${{ steps.release.outputs.id }}
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      TAG: ${{ github.ref_name }}
+    steps:
+      - name: Find or create the draft release for the tag
+        id: release
+        run: |
+          # A re-run reuses the release this tag already has (draft or not).
+          id=$(gh api "repos/$GITHUB_REPOSITORY/releases" --paginate --jq '.[] | select(.tag_name == env.TAG) | .id' | head -n 1)
+          if [ -z "$id" ]; then
+            id=$(gh api -X POST "repos/$GITHUB_REPOSITORY/releases" \
+              -f tag_name="$TAG" \
+              -f name="HeckTunes $TAG" \
+              -f body="Unsigned builds. See the README for how to open them on Windows and macOS." \
+              -F draft=true -F prerelease=false --jq .id)
+          fi
+          echo "Release id: $id"
+          echo "id=$id" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: create-release
     strategy:
       fail-fast: false
       matrix:
@@ -60,25 +86,27 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
+          releaseId: ${{ needs.create-release.outputs.id }}
           tagName: ${{ github.ref_name }}
-          releaseName: HeckTunes ${{ github.ref_name }}
-          releaseBody: Unsigned builds. See the README for how to open them on Windows and macOS.
-          releaseDraft: true
-          prerelease: false
           args: --target ${{ matrix.target }} --bundles ${{ matrix.bundles }}
 
   # echo-sync is GPLv3 and ships inside the installers, so its source goes on the same release page.
   echo-sync-source:
-    needs: [check-version, build]
-    # Runs even if one matrix leg failed; the upload still fails loudly if no draft release exists.
-    # Skipped when the version check failed, since nothing was built.
-    if: always() && !cancelled() && needs.check-version.result == 'success'
+    needs: [create-release, build]
+    # Runs even if one matrix leg failed. Skipped when no release was made (e.g. the version
+    # check failed), since nothing was built.
+    if: always() && !cancelled() && needs.create-release.result == 'success'
     runs-on: ubuntu-latest
     env:
-      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      TAG: ${{ github.ref_name }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      RELEASE_ID: ${{ needs.create-release.outputs.id }}
+      FILE: echopod-v0.11.1-source.tar.gz
     steps:
       - name: Attach echo-sync's source to the draft release
         run: |
-          curl -fsSL --retry 3 -o echopod-v0.11.1-source.tar.gz https://github.com/BasilSkyWalk/echopod/archive/refs/tags/v0.11.1.tar.gz
-          gh release upload "$TAG" echopod-v0.11.1-source.tar.gz --clobber --repo "$GITHUB_REPOSITORY"
+          curl -fsSL --retry 3 -o "$FILE" https://github.com/BasilSkyWalk/echopod/archive/refs/tags/v0.11.1.tar.gz
+          # Replace an earlier upload (a re-run), then upload into the release by id.
+          old=$(gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID/assets" --paginate --jq '.[] | select(.name == env.FILE) | .id')
+          if [ -n "$old" ]; then gh api -X DELETE "repos/$GITHUB_REPOSITORY/releases/assets/$old"; fi
+          gh api -X POST "https://uploads.github.com/repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID/assets?name=$FILE" \
+            -H "Content-Type: application/gzip" --input "$FILE" --jq '"Uploaded \(.name) (\(.size) bytes)"'
