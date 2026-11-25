@@ -2,6 +2,8 @@ use crate::device::echosync::ECHO_SYNC_VERSION;
 use serde::Serialize;
 use std::path::Path;
 
+pub const HECKTUNES_LICENSE: &str = "GNU GPL v3 or later (GPL-3.0-or-later)";
+
 pub const ECHO_SYNC_SOURCE: &str = "https://github.com/BasilSkyWalk/echopod/tree/v0.11.1";
 
 #[derive(Debug, Clone, Serialize)]
@@ -11,7 +13,7 @@ pub struct AboutInfo {
     pub echo_sync_source: String,
     pub echo_sync_license: Option<String>,
     pub third_party_notices: Option<String>,
-    /// HeckTunes' own licence; `None` until the owner chooses one.
+    /// HeckTunes' own licence (the full text is LICENSE in the source repository).
     pub hecktunes_license: Option<String>,
 }
 
@@ -24,7 +26,7 @@ pub fn about(resource_dir: Option<&Path>) -> AboutInfo {
         echo_sync_source: ECHO_SYNC_SOURCE.to_string(),
         echo_sync_license: read("echo-sync-LICENSE.txt"),
         third_party_notices: read("THIRD_PARTY_NOTICES.md"),
-        hecktunes_license: None,
+        hecktunes_license: Some(HECKTUNES_LICENSE.to_string()),
     }
 }
 
@@ -43,5 +45,6 @@ mod tests {
         assert_eq!(a.echo_sync_version, "0.11.1");
         assert!(a.echo_sync_source.ends_with("/tree/v0.11.1"));
         assert_eq!(about(None).echo_sync_license, None);
+        assert_eq!(about(None).hecktunes_license.as_deref(), Some(HECKTUNES_LICENSE));
     }
 }

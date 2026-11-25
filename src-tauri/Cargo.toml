@@ -3,6 +3,7 @@ name = "hecktunes"
 version = "0.4.0"
 description = "Music library and Echo Mini sync"
 authors = ["HeckTunes contributors"]
+license = "GPL-3.0-or-later"
 edition = "2024"
 rust-version = "1.90"
 

@@ -37,4 +37,4 @@ Releases: push a tag like `v0.1.0`; GitHub Actions builds the installers into a 
 
 ## Licences
 
-echo-sync (bundled as a separate program) is GPLv3; its licence and a link to its source are in **About**, along with the licences of the open-source components HeckTunes is built from. HeckTunes' own licence hasn't been chosen yet.
+echo-sync (bundled as a separate program) is GPLv3; its licence and a link to its source are in **About**, along with the licences of the open-source components HeckTunes is built from. HeckTunes itself is free software under the GNU General Public License, version 3 or (at your option) any later version (GPL-3.0-or-later); see `LICENSE`.
