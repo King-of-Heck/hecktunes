@@ -1,6 +1,6 @@
 [package]
 name = "hecktunes"
-version = "0.4.0"
+version = "0.4.1"
 description = "Music library and Echo Mini sync"
 authors = ["HeckTunes contributors"]
 license = "GPL-3.0-or-later"
