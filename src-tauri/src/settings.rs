@@ -6,6 +6,28 @@ use std::path::{Path, PathBuf};
 pub struct Settings {
     pub library_root: Option<PathBuf>,
     pub acoustid_key: Option<String>,
+    /// Player volume, 0–100; missing means full volume.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub volume: Option<u8>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub muted: bool,
+}
+
+pub const DEFAULT_VOLUME: u8 = 100;
+
+impl Settings {
+    pub fn volume(&self) -> u8 {
+        self.volume.unwrap_or(DEFAULT_VOLUME).min(100)
+    }
+    /// Whether the settings that only take effect after a restart differ.
+    fn restart_differs(&self, other: &Settings) -> bool {
+        self.library_root != other.library_root || self.acoustid_key != other.acoustid_key
+    }
+}
+
+/// The player volume changes at once, so it never asks for a restart.
+pub fn with_volume(saved: Settings, volume: u8, muted: bool) -> Settings {
+    Settings { volume: Some(volume.min(100)), muted, ..saved }
 }
 
 pub const FILE_NAME: &str = "settings.json";
@@ -140,6 +162,9 @@ pub struct SettingsView {
     pub album_count: usize,
     /// Set when the library folder in use is missing (e.g. its drive isn't connected).
     pub library_unavailable: Option<String>,
+    /// Player volume, 0-100, and mute, as saved.
+    pub volume: u8,
+    pub muted: bool,
 }
 
 pub fn view(
@@ -158,10 +183,12 @@ pub fn view(
         saved_library_root: saved.library_root.as_ref().map(|p| p.display().to_string()),
         acoustid_key: saved.acoustid_key.clone(),
         acoustid_key_active: key_active,
-        restart_needed: saved != startup,
+        restart_needed: saved.restart_differs(startup),
         problem,
         album_count,
         library_unavailable: (!library_available).then(|| unavailable_message(active_root)),
+        volume: saved.volume(),
+        muted: saved.muted,
     }
 }
 
@@ -232,7 +259,7 @@ mod tests {
     fn save_round_trips_and_leaves_no_temp_file() {
         let dir = tempfile::tempdir().unwrap();
         let cfg = dir.path().join("cfg");
-        let s = Settings { library_root: Some(PathBuf::from("E:/Tunes")), acoustid_key: Some("k".into()) };
+        let s = Settings { library_root: Some(PathBuf::from("E:/Tunes")), acoustid_key: Some("k".into()), ..Default::default() };
         save(&cfg, &s).unwrap();
         assert_eq!(load_checked(&cfg), (s, None));
         let names: Vec<_> = std::fs::read_dir(&cfg).unwrap().map(|e| e.unwrap().file_name()).collect();
@@ -263,7 +290,7 @@ mod tests {
     #[test]
     fn view_reports_what_is_in_use_and_whether_a_restart_is_needed() {
         let startup = Settings::default();
-        let saved = Settings { library_root: Some(PathBuf::from("E:/Tunes")), acoustid_key: None };
+        let saved = Settings { library_root: Some(PathBuf::from("E:/Tunes")), acoustid_key: None, ..Default::default() };
         let v = view(&saved, &startup, Path::new("C:/Music/HeckTunes"), Path::new("C:/Music/HeckTunes"), true, None, 0, true);
         assert_eq!(v.library_root, "C:/Music/HeckTunes");
         assert_eq!(v.saved_library_root.as_deref(), Some("E:/Tunes"));
@@ -271,6 +298,24 @@ mod tests {
         let same = view(&startup, &startup, Path::new("C:/Music/HeckTunes"), Path::new("C:/Music/HeckTunes"), false, None, 2, true);
         assert!(!same.restart_needed);
         assert_eq!(same.album_count, 2);
+    }
+
+    #[test]
+    fn volume_defaults_to_full_saves_and_never_asks_for_a_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!((Settings::default().volume(), Settings::default().muted), (100, false));
+        let startup = Settings::default();
+        let s = with_volume(startup.clone(), 140, true);
+        assert_eq!((s.volume(), s.muted), (100, true), "clamped to 100");
+        let s = with_volume(s, 35, false);
+        save(dir.path(), &s).unwrap();
+        let back = load(dir.path());
+        assert_eq!((back.volume(), back.muted), (35, false));
+        let v = view(&back, &startup, Path::new("C:/M"), Path::new("C:/M"), false, None, 0, true);
+        assert_eq!((v.volume, v.muted, v.restart_needed), (35, false, false));
+        // An older settings.json without the fields still loads.
+        std::fs::write(dir.path().join(FILE_NAME), r#"{"library_root":null,"acoustid_key":null}"#).unwrap();
+        assert_eq!(load_checked(dir.path()), (Settings::default(), None));
     }
 
     #[test]
@@ -342,10 +387,10 @@ mod root_tests {
 
     #[test]
     fn saving_over_a_damaged_file_keeps_the_library_folder_in_use() {
-        let in_effect = Settings { library_root: Some("E:/Tunes".into()), acoustid_key: None };
+        let in_effect = Settings { library_root: Some("E:/Tunes".into()), acoustid_key: None, ..Default::default() };
         let base = save_base(Settings::default(), true, &in_effect);
         assert_eq!(with_acoustid_key(base, Some("k".into())).library_root.as_deref(), Some(Path::new("E:/Tunes")));
-        let fine = Settings { library_root: None, acoustid_key: Some("old".into()) };
+        let fine = Settings { library_root: None, acoustid_key: Some("old".into()), ..Default::default() };
         assert_eq!(save_base(fine.clone(), false, &in_effect), fine);
     }
 

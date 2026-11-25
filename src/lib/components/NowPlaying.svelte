@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { onMount } from 'svelte';
   import * as api from '../api';
   import { formatDuration } from '../api';
   import type { PlayerStatus, QueueItem } from '../types';
@@ -23,6 +24,29 @@
     dragging = null;
     api.playerSeek(ms).catch(fail);
   }
+
+  // Volume lives in the Rust player and settings.json; this mirrors it.
+  let volume = $state(100);
+  let muted = $state(false);
+  onMount(() => {
+    api
+      .getSettings()
+      .then((s) => {
+        volume = s.volume;
+        muted = s.muted;
+      })
+      .catch(fail);
+  });
+  function setVolume(v: number, save: boolean) {
+    volume = v;
+    if (v > 0) muted = false; // moving the slider up unmutes
+    api.playerSetVolume(volume, muted, save).catch(fail);
+  }
+  function toggleMute() {
+    muted = !muted;
+    api.playerSetVolume(volume, muted, true).catch(fail);
+  }
+  const silent = $derived(muted || volume === 0);
 </script>
 
 {#if item}
@@ -55,12 +79,26 @@
       />
       <span class="time">{formatDuration(duration)}</span>
     </div>
+    <div class="volume">
+      <button title={muted ? 'Unmute' : 'Mute'} aria-pressed={muted} onclick={toggleMute}>{silent ? '🔇' : '🔊'}</button>
+      <input
+        type="range"
+        min="0"
+        max="100"
+        step="1"
+        value={muted ? 0 : volume}
+        oninput={(e) => setVolume(Number(e.currentTarget.value), false)}
+        onchange={(e) => setVolume(Number(e.currentTarget.value), true)}
+        title={`Volume ${muted ? 0 : volume}%`}
+        aria-label="Volume"
+      />
+    </div>
     <button class="close" title="Stop" onclick={() => api.playerStop().catch(fail)}>■</button>
   </footer>
 {/if}
 
 <style>
-  .bar { display: grid; grid-template-columns: minmax(180px, 1fr) auto minmax(200px, 2fr) auto; align-items: center; gap: 16px; padding: 8px 16px; background: var(--panel); border-top: 1px solid var(--border); }
+  .bar { display: grid; grid-template-columns: minmax(180px, 1fr) auto minmax(200px, 2fr) auto auto; align-items: center; gap: 16px; padding: 8px 16px; background: var(--panel); border-top: 1px solid var(--border); }
   .what { display: flex; flex-direction: column; min-width: 0; }
   .what strong, .what span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .what span { color: var(--muted); font-size: 12px; }
@@ -70,5 +108,8 @@
   .controls .main { font-size: 18px; }
   .seek { display: flex; align-items: center; gap: 8px; }
   .seek input { flex: 1; }
+  .volume { display: flex; align-items: center; gap: 4px; }
+  .volume button { border: none; background: transparent; font-size: 14px; padding: 4px 6px; }
+  .volume input { width: 90px; }
   .time { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; min-width: 36px; text-align: center; }
 </style>

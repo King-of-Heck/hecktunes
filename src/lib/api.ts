@@ -90,6 +90,9 @@ export const playerPause = () => invoke<void>('player_pause');
 export const playerResume = () => invoke<void>('player_resume');
 export const playerSeek = (positionMs: number) => invoke<void>('player_seek', { positionMs: Math.max(0, Math.round(positionMs)) });
 export const playerStop = () => invoke<void>('player_stop');
+/** `save` also writes the volume to settings.json; pass false while a slider is still moving. */
+export const playerSetVolume = (volume: number, muted: boolean, save: boolean) =>
+  invoke<void>('player_set_volume', { volume: Math.min(100, Math.max(0, Math.round(volume))), muted, save });
 export const onPlayer = (cb: (s: PlayerStatus) => void): Promise<UnlistenFn> => listen<PlayerStatus>('player', (e) => cb(e.payload));
 
 export const getSettings = () => invoke<SettingsView>('get_settings');

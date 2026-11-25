@@ -92,7 +92,8 @@ pub fn run() {
                     let _ = player_handle.emit("player", status);
                 },
             );
-            let settings = commands::SettingsState { config_dir, default_root, active_root, startup, in_effect, key_active };
+            player.set_gain(player::gain(startup.volume(), startup.muted));
+            let settings = commands::SettingsState { config_dir, default_root, active_root, startup, in_effect, key_active, save_lock: Default::default() };
             let album_count = lib.lock().unwrap().list_albums().map(|a| a.len().to_string()).unwrap_or_else(|e| format!("error: {e:#}"));
             diag::log(&format!(
                 "start-up done in {} ms: library {} (available: {}), albums: {album_count}",
@@ -136,6 +137,7 @@ pub fn run() {
             commands::player_resume,
             commands::player_seek,
             commands::player_stop,
+            commands::player_set_volume,
             commands::get_settings,
             commands::set_library_root,
             commands::set_acoustid_key,

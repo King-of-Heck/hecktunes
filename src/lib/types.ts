@@ -236,6 +236,9 @@ export interface SettingsView {
   album_count: number;
   /** Set when the library folder in use is missing (e.g. its drive isn't connected). */
   library_unavailable: string | null;
+  /** Player volume, 0-100, and mute, as saved. */
+  volume: number;
+  muted: boolean;
 }
 
 export interface AboutInfo {

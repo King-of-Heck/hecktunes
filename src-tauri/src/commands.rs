@@ -35,6 +35,9 @@ pub struct SettingsState {
     /// startup (which may come from the library database when settings.json is damaged).
     pub in_effect: Settings,
     pub key_active: bool,
+    /// Held across each read-change-write of settings.json, so quick volume saves can't
+    /// overwrite another setting saved at the same moment.
+    pub save_lock: Mutex<()>,
 }
 
 fn settings_view(state: &AppState, saved: &Settings, problem: Option<String>) -> CmdResult<SettingsView> {
@@ -57,6 +60,7 @@ pub fn get_settings(state: State<AppState>) -> CmdResult<SettingsView> {
 
 #[tauri::command(async)]
 pub fn set_library_root(state: State<AppState>, path: Option<String>) -> CmdResult<SettingsView> {
+    let _saving = state.settings.save_lock.lock().unwrap_or_else(|p| p.into_inner());
     let base = settings_to_update(&state);
     let albums = state.lib.lock().unwrap().album_count().map_err(err)?;
     let updated = settings::with_library_root(base, path.map(PathBuf::from), albums).map_err(err)?;
@@ -70,6 +74,7 @@ pub fn set_library_root(state: State<AppState>, path: Option<String>) -> CmdResu
 
 #[tauri::command(async)]
 pub fn set_acoustid_key(state: State<AppState>, key: Option<String>) -> CmdResult<SettingsView> {
+    let _saving = state.settings.save_lock.lock().unwrap_or_else(|p| p.into_inner());
     let updated = settings::with_acoustid_key(settings_to_update(&state), key);
     settings::save(&state.settings.config_dir, &updated).map_err(err)?;
     settings_view(&state, &updated, None)
@@ -367,6 +372,19 @@ pub fn player_stop(state: State<AppState>) {
     state.player.stop();
 }
 
+/// Sets the player volume (0-100) and mute at once; `save` also writes them to settings.json
+/// (the UI saves when a slider drag ends, not on every step of it).
+#[tauri::command(async)]
+pub fn player_set_volume(state: State<AppState>, volume: u8, muted: bool, save: bool) -> CmdResult<()> {
+    state.player.set_gain(crate::player::gain(volume, muted));
+    if save {
+        let _saving = state.settings.save_lock.lock().unwrap_or_else(|p| p.into_inner());
+        let updated = settings::with_volume(settings_to_update(&state), volume, muted);
+        settings::save(&state.settings.config_dir, &updated).map_err(err)?;
+    }
+    Ok(())
+}
+
 #[tauri::command(async)]
 pub fn about(app: AppHandle) -> crate::about::AboutInfo {
     use tauri::Manager;
@@ -444,6 +462,7 @@ mod player_release_tests {
         fn finished(&self) -> bool {
             false
         }
+        fn set_gain(&mut self, _gain: f32) {}
     }
 
     fn playing(track_id: i64) -> (PlayerService, Arc<Mutex<bool>>) {

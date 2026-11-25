@@ -24,11 +24,24 @@ pub trait Audio {
     fn stop(&mut self);
     fn position_ms(&self) -> u64;
     fn finished(&self) -> bool;
+    /// Output gain, 0.0 (silent) to 1.0 (full); kept for every track loaded afterwards.
+    fn set_gain(&mut self, gain: f32);
+}
+
+/// The gain for a volume slider position (0–100) and mute switch. Squared, so the slider's
+/// lower half isn't almost all "loud": loudness is heard roughly logarithmically.
+pub fn gain(volume: u8, muted: bool) -> f32 {
+    if muted {
+        return 0.0;
+    }
+    let v = f32::from(volume.min(100)) / 100.0;
+    v * v
 }
 
 pub struct RodioAudio {
     sink: rodio::MixerDeviceSink,
     player: rodio::Player,
+    gain: f32,
 }
 
 impl RodioAudio {
@@ -36,7 +49,14 @@ impl RodioAudio {
         let mut sink = rodio::DeviceSinkBuilder::open_default_sink().map_err(|e| anyhow!("{e}"))?;
         sink.log_on_drop(false);
         let player = rodio::Player::connect_new(sink.mixer());
-        Ok(Self { sink, player })
+        Ok(Self { sink, player, gain: 1.0 })
+    }
+
+    /// A fresh player on the device at the current gain.
+    fn new_player(&self) -> rodio::Player {
+        let player = rodio::Player::connect_new(self.sink.mixer());
+        player.set_volume(self.gain);
+        player
     }
 }
 
@@ -48,7 +68,7 @@ impl Audio for RodioAudio {
         let duration = source.total_duration().map(|d| d.as_millis() as u64);
         // Drop the old player and start a fresh one rather than `clear()`, which blocks until the
         // audio thread answers and would hang this thread on a wedged or unplugged device.
-        self.player = rodio::Player::connect_new(self.sink.mixer());
+        self.player = self.new_player();
         self.player.append(source);
         self.player.play();
         Ok(duration)
@@ -65,13 +85,17 @@ impl Audio for RodioAudio {
     }
     fn stop(&mut self) {
         // Dropping a `Player` sets its `stopped` flag, which silences and removes its sources.
-        self.player = rodio::Player::connect_new(self.sink.mixer());
+        self.player = self.new_player();
     }
     fn position_ms(&self) -> u64 {
         self.player.get_pos().as_millis() as u64
     }
     fn finished(&self) -> bool {
         self.player.empty()
+    }
+    fn set_gain(&mut self, gain: f32) {
+        self.gain = gain;
+        self.player.set_volume(gain);
     }
 }
 
@@ -105,6 +129,8 @@ enum Cmd {
     Pause,
     Resume,
     Seek(u64),
+    /// New output gain (see `gain`).
+    SetGain(f32),
     /// `reply` hears back once the stop has been handled.
     Stop { reply: Option<Sender<()>> },
 }
@@ -135,8 +161,18 @@ impl PlayerService {
             .spawn(move || {
                 let mut audio: Option<Box<dyn Audio>> = None;
                 let mut status = PlayerStatus::idle();
+                let mut gain = 1.0_f32;
                 loop {
                     match rx.recv_timeout(TICK) {
+                        Ok(Cmd::SetGain(g)) => {
+                            // Kept for a device opened later; no status change to report.
+                            gain = g;
+                            if let Some(a) = audio.as_mut() {
+                                if catch_unwind(AssertUnwindSafe(|| a.set_gain(g))).is_err() {
+                                    audio = None;
+                                }
+                            }
+                        }
                         Ok(mut cmd) => {
                             let track_id = match &cmd {
                                 Cmd::Play { track_id, .. } => Some(*track_id),
@@ -146,7 +182,7 @@ impl PlayerService {
                                 Cmd::Stop { reply } => reply.take(),
                                 _ => None,
                             };
-                            let done = catch_unwind(AssertUnwindSafe(|| handle(cmd, &open, &mut audio, &mut status)));
+                            let done = catch_unwind(AssertUnwindSafe(|| handle(cmd, &open, &mut audio, &mut status, gain)));
                             if done.is_err() {
                                 audio = None;
                                 status = panic_status(track_id);
@@ -220,6 +256,10 @@ impl PlayerService {
     pub fn stop(&self) {
         let _ = self.tx.send(Cmd::Stop { reply: None });
     }
+    /// Sets the output gain now and for every later track (see `gain`).
+    pub fn set_gain(&self, gain: f32) {
+        let _ = self.tx.send(Cmd::SetGain(gain.clamp(0.0, 1.0)));
+    }
 }
 
 /// What the UI sees when the audio code panicked; the device is reopened on the next play.
@@ -241,12 +281,16 @@ fn handle(
     open: &dyn Fn() -> Result<Box<dyn Audio>>,
     audio: &mut Option<Box<dyn Audio>>,
     status: &mut PlayerStatus,
+    gain: f32,
 ) {
     match cmd {
         Cmd::Play { track_id, path, duration_ms } => {
             if audio.is_none() {
                 match open() {
-                    Ok(a) => *audio = Some(a),
+                    Ok(mut a) => {
+                        a.set_gain(gain);
+                        *audio = Some(a);
+                    }
                     Err(e) => {
                         *status = PlayerStatus {
                             error: Some(format!("No sound output is available ({e}).")),
@@ -301,6 +345,7 @@ fn handle(
                 }
             }
         }
+        Cmd::SetGain(_) => unreachable!("handled by the player loop"),
         Cmd::Stop { .. } => {
             if let Some(a) = audio.as_mut() {
                 a.stop();
@@ -330,6 +375,8 @@ mod tests {
         control_calls: u32,
         /// How long `stop` takes (a slow or wedged device).
         stop_delay_ms: u64,
+        /// Last gain set, if any.
+        gain: Option<f32>,
     }
 
     struct FakeAudio(Arc<Mutex<Shared>>);
@@ -379,6 +426,9 @@ mod tests {
         }
         fn finished(&self) -> bool {
             self.0.lock().unwrap().finished
+        }
+        fn set_gain(&mut self, gain: f32) {
+            self.0.lock().unwrap().gain = Some(gain);
         }
     }
 
@@ -571,6 +621,33 @@ mod tests {
         let t = std::time::Instant::now();
         assert!(!svc.stop_and_wait(std::time::Duration::from_millis(50)));
         assert!(t.elapsed() < std::time::Duration::from_millis(900));
+    }
+
+    #[test]
+    fn gain_follows_the_slider_squared_and_mute_silences() {
+        assert_eq!(gain(100, false), 1.0);
+        assert_eq!(gain(50, false), 0.25);
+        assert_eq!(gain(0, false), 0.0);
+        assert_eq!(gain(200, false), 1.0);
+        assert_eq!(gain(80, true), 0.0);
+    }
+
+    #[test]
+    fn gain_set_before_the_device_opens_applies_to_it_and_later_changes_apply_live() {
+        let shared = Arc::new(Mutex::new(Shared::default()));
+        let (svc, rx) = service(shared.clone(), Arc::new(Mutex::new(false)));
+        svc.set_gain(0.3);
+        svc.play(1, PathBuf::from("a.flac"), 0);
+        wait_for(&rx, |s| s.state == PlayState::Playing);
+        assert_eq!(shared.lock().unwrap().gain, Some(0.3));
+        svc.set_gain(0.6);
+        svc.pause(); // commands run in order, so once paused the gain is set
+        wait_for(&rx, |s| s.state == PlayState::Paused);
+        assert_eq!(shared.lock().unwrap().gain, Some(0.6));
+        svc.set_gain(7.0);
+        svc.resume();
+        wait_for(&rx, |s| s.state == PlayState::Playing);
+        assert_eq!(shared.lock().unwrap().gain, Some(1.0), "clamped");
     }
 
     #[test]
