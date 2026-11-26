@@ -30,7 +30,7 @@
   "bundle": {
     "active": true,
     "targets": "all",
-    "externalBin": ["binaries/echo-sync"],
+    "externalBin": ["binaries/echo-sync", "binaries/ffmpeg"],
     "resources": {
       "licenses/echo-sync-LICENSE.txt": "licenses/echo-sync-LICENSE.txt",
       "licenses/THIRD_PARTY_NOTICES.md": "licenses/THIRD_PARTY_NOTICES.md"

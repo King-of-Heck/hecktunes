@@ -1,6 +1,7 @@
 pub mod about;
 pub mod artwork;
 pub mod commands;
+pub mod convert;
 pub mod diag;
 pub mod device;
 pub mod identify;
@@ -85,6 +86,10 @@ pub fn run() {
                 let _ = handle.emit("import-job", update);
             });
             let sync = SyncService::new(lib.clone(), device::echosync::sidecar_path());
+            let convert_handle = app.handle().clone();
+            let convert = convert::ConvertService::start(lib.clone(), convert::ffmpeg::sidecar_path(), convert::default_workers(), move |event| {
+                let _ = convert_handle.emit("convert", event);
+            });
             let player_handle = app.handle().clone();
             let player = player::PlayerService::start(
                 || Ok(Box::new(player::RodioAudio::open()?) as Box<dyn player::Audio>),
@@ -101,7 +106,7 @@ pub fn run() {
                 settings.active_root.display(),
                 choice.available
             ));
-            app.manage(AppState { lib, queue, sync, player, settings, library_available: choice.available, vinyl_tmp, preview_lock: Default::default() });
+            app.manage(AppState { lib, queue, sync, convert, player, settings, library_available: choice.available, vinyl_tmp, preview_lock: Default::default() });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -118,6 +123,11 @@ pub fn run() {
             commands::update_track,
             commands::list_songs,
             commands::delete_album,
+            commands::convert_unavailable,
+            commands::convert_album,
+            commands::cancel_convert,
+            commands::remove_aac,
+            commands::set_album_sync_as,
             commands::list_playlists,
             commands::create_playlist,
             commands::rename_playlist,

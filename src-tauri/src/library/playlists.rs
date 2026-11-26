@@ -30,11 +30,11 @@ pub struct PlaylistEntry {
     pub song: SongRow,
 }
 
-/// Same column order as `TRACK_COLUMNS` (indices 0..=11), then album fields 12..=14.
-const SONG_COLUMNS: &str = "t.id, t.album_id, t.disc, t.number, t.title, t.artist, t.duration_ms, t.format, t.file_path, t.size_bytes, t.mb_recording_id, t.content_hash, a.title, a.album_artist, a.year";
+/// Same column order as `TRACK_COLUMNS` (indices 0..=14), then album fields 15..=17.
+const SONG_COLUMNS: &str = "t.id, t.album_id, t.disc, t.number, t.title, t.artist, t.duration_ms, t.format, t.file_path, t.size_bytes, t.mb_recording_id, t.content_hash, t.aac_path, t.aac_size, t.aac_hash, a.title, a.album_artist, a.year";
 
 fn song_from_row(root: &Path, r: &rusqlite::Row) -> rusqlite::Result<SongRow> {
-    Ok(SongRow { track: track_from_row(root, r)?, album_title: r.get(12)?, album_artist: r.get(13)?, year: r.get(14)? })
+    Ok(SongRow { track: track_from_row(root, r)?, album_title: r.get(15)?, album_artist: r.get(16)?, year: r.get(17)? })
 }
 
 fn clean_name(name: &str) -> Result<String> {
@@ -120,7 +120,7 @@ impl Library {
              JOIN tracks t ON t.id = i.track_id JOIN albums a ON a.id = t.album_id
              WHERE i.playlist_id = ?1 ORDER BY i.position, i.id"
         ))?;
-        let rows = stmt.query_map([id], |r| Ok(PlaylistEntry { item_id: r.get(15)?, song: song_from_row(&root, r)? }))?;
+        let rows = stmt.query_map([id], |r| Ok(PlaylistEntry { item_id: r.get(18)?, song: song_from_row(&root, r)? }))?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 

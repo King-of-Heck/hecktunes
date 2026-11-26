@@ -1,11 +1,11 @@
 use crate::artwork::prepare_cover;
 use crate::library::hash::file_hash;
-use crate::library::{AlbumEdit, AlbumRow, Library, TrackEdit, TrackRow};
+use crate::library::{AacCopy, AlbumEdit, AlbumRow, Library, TrackEdit, TrackRow};
 use crate::model::TrackTags;
 use crate::tags::write_tags;
 use anyhow::{anyhow, Result};
 
-fn tags_for(album: &AlbumRow, track: &TrackRow, all: &[TrackRow]) -> TrackTags {
+pub(crate) fn tags_for(album: &AlbumRow, track: &TrackRow, all: &[TrackRow]) -> TrackTags {
     let disc_total = all.iter().map(|t| t.disc).max().unwrap_or(1);
     TrackTags {
         title: track.title.clone(),
@@ -28,6 +28,16 @@ fn record_file_state(lib: &mut Library, track: &TrackRow) -> Result<()> {
     lib.set_track_file_state(track.id, size, &file_hash(&track.file_path)?)
 }
 
+/// Writes the same tags (and cover, when given) into the track's AAC copy and records its new size
+/// and hash. A copy whose file has gone is left for Convert to AAC to remake.
+fn rewrite_aac_copy(lib: &mut Library, track: &TrackRow, tags: &TrackTags, cover: Option<&[u8]>) -> Result<()> {
+    let Some(copy) = track.aac.as_ref().filter(|c| c.path.is_file()) else { return Ok(()) };
+    let written = write_tags(&copy.path, tags, cover);
+    let size = std::fs::metadata(&copy.path)?.len();
+    lib.set_track_aac(track.id, Some(&AacCopy { path: copy.path.clone(), size, hash: file_hash(&copy.path)? }))?;
+    written
+}
+
 /// After a rewrite that may have stopped part-way, store each file's real size and hash.
 fn record_all(lib: &mut Library, tracks: &[TrackRow]) {
     for t in tracks {
@@ -41,11 +51,13 @@ fn rewrite_album_files(lib: &mut Library, album_id: i64) -> Result<()> {
     let album = lib.album(album_id)?.ok_or_else(|| anyhow!("album {album_id} not found"))?;
     let tracks = lib.album_tracks(album_id)?;
     for t in &tracks {
-        if let Err(e) = write_tags(&t.file_path, &tags_for(&album, t, &tracks), None) {
+        let tags = tags_for(&album, t, &tracks);
+        if let Err(e) = write_tags(&t.file_path, &tags, None) {
             record_all(lib, &tracks);
             return Err(e);
         }
         record_file_state(lib, t)?;
+        rewrite_aac_copy(lib, t, &tags, None)?;
     }
     Ok(())
 }
@@ -61,13 +73,15 @@ pub fn apply_track_edit(lib: &mut Library, track_id: i64, edit: &TrackEdit) -> R
     let track = lib.track(track_id)?.ok_or_else(|| anyhow!("track {track_id} not found"))?;
     let album = lib.album(track.album_id)?.ok_or_else(|| anyhow!("album {} not found", track.album_id))?;
     let all = lib.album_tracks(track.album_id)?;
-    if let Err(e) = write_tags(&track.file_path, &tags_for(&album, &track, &all), None) {
+    let tags = tags_for(&album, &track, &all);
+    if let Err(e) = write_tags(&track.file_path, &tags, None) {
         if let Err(re) = record_file_state(lib, &track) {
             eprintln!("could not record file state for track {}: {re}", track.id);
         }
         return Err(e);
     }
-    record_file_state(lib, &track)
+    record_file_state(lib, &track)?;
+    rewrite_aac_copy(lib, &track, &tags, None)
 }
 
 /// Replaces the album's cover: writes `cover.jpg` in its folder, embeds the same JPEG in every
@@ -84,11 +98,13 @@ pub fn set_album_cover(lib: &mut Library, album_id: i64, image: &[u8]) -> Result
     }
     lib.set_album_cover_path(album_id, Some(&target))?;
     for t in &tracks {
-        if let Err(e) = write_tags(&t.file_path, &tags_for(&album, t, &tracks), Some(&cover)) {
+        let tags = tags_for(&album, t, &tracks);
+        if let Err(e) = write_tags(&t.file_path, &tags, Some(&cover)) {
             record_all(lib, &tracks);
             return Err(e);
         }
         record_file_state(lib, t)?;
+        rewrite_aac_copy(lib, t, &tags, Some(&cover))?;
     }
     Ok(())
 }
@@ -288,5 +304,34 @@ mod tests {
             let now = lib.track(t.id).unwrap().unwrap();
             assert_eq!((now.size_bytes, now.content_hash), (t.size_bytes, t.content_hash.clone()));
         }
+    }
+
+    #[test]
+    fn edits_and_new_covers_reach_the_aac_copies_too() {
+        use lofty::prelude::*;
+        let Some(exe) = crate::convert::tests::test_ffmpeg() else { return };
+        let dir = tempfile::tempdir().unwrap();
+        let mut l = Library::open_in_memory(dir.path().join("lib")).unwrap();
+        let a = crate::convert::tests::add_flac_album(&mut l, dir.path(), "Alb", "Band", 2, 44_100, 16, false);
+        let lib = std::sync::Mutex::new(l);
+        let cancel = std::sync::atomic::AtomicBool::new(false);
+        crate::convert::convert_album(&lib, &exe, a, 2, &cancel, &|_, _| {}).unwrap();
+        let mut l = lib.into_inner().unwrap();
+
+        apply_album_edit(&mut l, a, &AlbumEdit { title: "Renamed".into(), album_artist: "Band".into(), year: None, genre: None }).unwrap();
+        let first = l.album_tracks(a).unwrap()[0].clone();
+        apply_track_edit(&mut l, first.id, &TrackEdit { title: "Opener".into(), artist: "Band".into(), disc: 1, number: 1 }).unwrap();
+        set_album_cover(&mut l, a, &crate::test_support::png_bytes(32, 32)).unwrap();
+
+        for t in l.album_tracks(a).unwrap() {
+            let c = t.aac.unwrap();
+            assert_eq!((c.size, c.hash.clone()), (std::fs::metadata(&c.path).unwrap().len(), file_hash(&c.path).unwrap()));
+            let tf = lofty::read_from_path(&c.path).unwrap();
+            let tag = tf.primary_tag().unwrap();
+            assert_eq!(tag.album().as_deref(), Some("Renamed"));
+            assert_eq!(tag.title().as_deref(), Some(t.title.as_str()));
+            assert_eq!(tag.pictures().len(), 1);
+        }
+        assert_eq!(l.album_tracks(a).unwrap()[0].title, "Opener");
     }
 }

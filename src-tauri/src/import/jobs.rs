@@ -237,6 +237,18 @@ impl Worker {
         };
         let label = format!("{} – {}", album.album_artist, album.title);
         let mut scan = scan_paths(&[album.folder_path.clone()]);
+        // The album's AAC copies (Convert to AAC) sit beside its tracks; they aren't tracks.
+        let copies: std::collections::HashSet<PathBuf> = match self.lib.lock().unwrap().album_tracks(album_id) {
+            Ok(tracks) => tracks.into_iter().filter_map(|t| t.aac.map(|c| c.path)).collect(),
+            Err(e) => {
+                self.emit(id, &label, JobState::Failed { error: format!("{e:#}") });
+                return;
+            }
+        };
+        for g in &mut scan.groups {
+            g.tracks.retain(|t| !copies.contains(&t.path));
+        }
+        scan.groups.retain(|g| !g.tracks.is_empty());
         if scan.groups.len() != 1 {
             self.emit(id, &label, JobState::Failed { error: "album folder is missing or changed".into() });
             return;
@@ -694,6 +706,31 @@ mod tests {
         assert_eq!(albums.len(), 1);
         assert_eq!(albums[0].mb_release_id.as_deref(), Some("m9"));
         assert!(!albums[0].needs_metadata);
+    }
+
+    #[test]
+    fn fix_metadata_ignores_the_albums_aac_copies() {
+        let Some(exe) = crate::convert::tests::test_ffmpeg() else { return };
+        let dir = tempfile::tempdir().unwrap();
+        let lib = Arc::new(Mutex::new(Library::open_in_memory(dir.path().join("lib")).unwrap()));
+        let a = crate::convert::tests::add_flac_album(&mut lib.lock().unwrap(), dir.path(), "Album", "Band", 2, 44_100, 16, false);
+        let cancel = std::sync::atomic::AtomicBool::new(false);
+        crate::convert::convert_album(&lib, &exe, a, 2, &cancel, &|_, _| {}).unwrap();
+        let (tx, rx) = channel();
+        let release = candidate("m9", "Album", "Band", &[("Song 1", 1500), ("Song 2", 1500)]);
+        let q = ImportQueue::start(lib.clone(), Arc::new(FakeSource { releases: vec![release], search_ids: vec!["m9".into()] }), move |u| {
+            let _ = tx.send(u);
+        });
+        q.reimport(a);
+        let ups = until(&rx, |s| is_terminal(s) || matches!(s, JobState::NeedsChoice { .. }));
+        if matches!(ups.last().unwrap().state, JobState::NeedsChoice { .. }) {
+            q.send(Command::Resolve { job_id: ups.last().unwrap().job_id, choice: JobChoice::Pick { mbid: "m9".into() } });
+        }
+        let ups = until(&rx, is_terminal);
+        assert!(matches!(ups.last().unwrap().state, JobState::Done { matched: true, .. }), "{:?}", ups.last());
+        let albums = lib.lock().unwrap().list_albums().unwrap();
+        assert_eq!(albums.len(), 1);
+        assert_eq!(albums[0].track_count, 2, "the .m4a copies must not become tracks");
     }
 
     #[test]

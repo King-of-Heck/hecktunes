@@ -70,6 +70,12 @@ CREATE TABLE meta (
     value TEXT
 );
 "#,
+    r#"
+ALTER TABLE tracks ADD COLUMN aac_path TEXT;
+ALTER TABLE tracks ADD COLUMN aac_size INTEGER;
+ALTER TABLE tracks ADD COLUMN aac_hash TEXT;
+ALTER TABLE albums ADD COLUMN sync_as TEXT NOT NULL DEFAULT 'flac';
+"#,
 ];
 
 const META_LIBRARY_ROOT: &str = "library_root";
@@ -113,6 +119,39 @@ pub struct AlbumRow {
     pub cover_path: Option<PathBuf>,
     pub needs_metadata: bool,
     pub track_count: u32,
+    /// Which files go to the Echo Mini: `flac` (the main files) or `aac` (the AAC copies).
+    pub sync_as: SyncAs,
+    /// Tracks that have an AAC copy.
+    pub aac_count: u32,
+}
+
+/// Which version of an album's tracks a sync copies.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SyncAs {
+    Flac,
+    Aac,
+}
+
+impl SyncAs {
+    fn as_sql(self) -> &'static str {
+        match self {
+            SyncAs::Flac => "flac",
+            SyncAs::Aac => "aac",
+        }
+    }
+
+    fn from_sql(s: &str) -> Self {
+        if s == "aac" { SyncAs::Aac } else { SyncAs::Flac }
+    }
+}
+
+/// A track's AAC copy: its file (beside the main file) and that file's size and BLAKE3 hash.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct AacCopy {
+    pub path: PathBuf,
+    pub size: u64,
+    pub hash: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -129,6 +168,8 @@ pub struct TrackRow {
     pub size_bytes: u64,
     pub mb_recording_id: Option<String>,
     pub content_hash: Option<String>,
+    /// The AAC copy made by Convert to AAC, if any.
+    pub aac: Option<AacCopy>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -168,8 +209,8 @@ fn now_secs() -> i64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0)
 }
 
-const ALBUM_COLUMNS: &str = "a.id, a.title, a.album_artist, a.year, a.genre, a.mb_release_id, a.folder_path, a.cover_path, a.needs_metadata, (SELECT COUNT(*) FROM tracks t WHERE t.album_id = a.id)";
-const TRACK_COLUMNS: &str = "id, album_id, disc, number, title, artist, duration_ms, format, file_path, size_bytes, mb_recording_id, content_hash";
+const ALBUM_COLUMNS: &str = "a.id, a.title, a.album_artist, a.year, a.genre, a.mb_release_id, a.folder_path, a.cover_path, a.needs_metadata, (SELECT COUNT(*) FROM tracks t WHERE t.album_id = a.id), a.sync_as, (SELECT COUNT(*) FROM tracks t WHERE t.album_id = a.id AND t.aac_path IS NOT NULL)";
+const TRACK_COLUMNS: &str = "id, album_id, disc, number, title, artist, duration_ms, format, file_path, size_bytes, mb_recording_id, content_hash, aac_path, aac_size, aac_hash";
 
 fn album_from_row(root: &Path, r: &Row) -> rusqlite::Result<AlbumRow> {
     Ok(AlbumRow {
@@ -183,6 +224,8 @@ fn album_from_row(root: &Path, r: &Row) -> rusqlite::Result<AlbumRow> {
         cover_path: r.get::<_, Option<String>>(7)?.map(|c| abs_path(root, &c)),
         needs_metadata: r.get(8)?,
         track_count: r.get::<_, i64>(9)? as u32,
+        sync_as: SyncAs::from_sql(&r.get::<_, String>(10)?),
+        aac_count: r.get::<_, i64>(11)? as u32,
     })
 }
 
@@ -200,6 +243,10 @@ fn track_from_row(root: &Path, r: &Row) -> rusqlite::Result<TrackRow> {
         size_bytes: r.get::<_, i64>(9)? as u64,
         mb_recording_id: r.get(10)?,
         content_hash: r.get(11)?,
+        aac: match (r.get::<_, Option<String>>(12)?, r.get::<_, Option<i64>>(13)?, r.get::<_, Option<String>>(14)?) {
+            (Some(path), Some(size), Some(hash)) => Some(AacCopy { path: abs_path(root, &path), size: size as u64, hash }),
+            _ => None,
+        },
     })
 }
 
@@ -457,6 +504,12 @@ impl Library {
             for t in &tracks {
                 let name = t.file_path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
                 tx.execute("UPDATE tracks SET file_path = ?1 WHERE id = ?2", params![format!("{new_rel_s}/{name}"), t.id])?;
+                if let Some(aac_name) = t.aac.as_ref().and_then(|c| c.path.file_name()) {
+                    tx.execute(
+                        "UPDATE tracks SET aac_path = ?1 WHERE id = ?2",
+                        params![format!("{new_rel_s}/{}", aac_name.to_string_lossy()), t.id],
+                    )?;
+                }
             }
             tx.commit()?;
             Ok(())
@@ -467,6 +520,25 @@ impl Library {
             }
             return Err(e);
         }
+        Ok(())
+    }
+
+    /// Records (or with `None`, forgets) a track's AAC copy. The path is stored relative to the
+    /// library folder.
+    pub fn set_track_aac(&mut self, track_id: i64, copy: Option<&AacCopy>) -> Result<()> {
+        let (path, size, hash) = match copy {
+            Some(c) => (Some(rel_text(c.path.strip_prefix(&self.root).unwrap_or(&c.path))), Some(c.size as i64), Some(c.hash.as_str())),
+            None => (None, None, None),
+        };
+        self.conn.execute(
+            "UPDATE tracks SET aac_path = ?1, aac_size = ?2, aac_hash = ?3 WHERE id = ?4",
+            params![path, size, hash, track_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn set_album_sync_as(&mut self, album_id: i64, sync_as: SyncAs) -> Result<()> {
+        self.conn.execute("UPDATE albums SET sync_as = ?1 WHERE id = ?2", params![sync_as.as_sql(), album_id])?;
         Ok(())
     }
 
@@ -850,6 +922,82 @@ mod tests {
         assert_eq!((a.size_bytes, a.content_hash.as_deref()), (10, Some("newer")));
         assert_eq!((b.size_bytes, b.content_hash.as_deref()), (12, Some("first")));
     }
+
+    fn aac(root: &Path, rel: &str) -> AacCopy {
+        AacCopy { path: abs_path(root, rel), size: 42, hash: "h".into() }
+    }
+
+    #[test]
+    fn new_albums_sync_flac_and_have_no_aac_copies() {
+        let mut lib = Library::open_in_memory(PathBuf::from("/lib")).unwrap();
+        let a = lib.insert_album(&album("X", "Y", None)).unwrap();
+        lib.insert_track(&track(a, 1, "Y/X")).unwrap();
+        let row = lib.album(a).unwrap().unwrap();
+        assert_eq!((row.sync_as, row.aac_count), (SyncAs::Flac, 0));
+        assert_eq!(lib.album_tracks(a).unwrap()[0].aac, None);
+    }
+
+    #[test]
+    fn aac_copies_and_sync_choice_are_stored_and_cleared() {
+        let root = PathBuf::from("/lib");
+        let mut lib = Library::open_in_memory(root.clone()).unwrap();
+        let a = lib.insert_album(&album("X", "Y", None)).unwrap();
+        let t1 = lib.insert_track(&track(a, 1, "Y/X")).unwrap();
+        lib.insert_track(&track(a, 2, "Y/X")).unwrap();
+        let copy = aac(&root, "Y/X/01 T1.m4a");
+        lib.set_track_aac(t1, Some(&copy)).unwrap();
+        lib.set_album_sync_as(a, SyncAs::Aac).unwrap();
+        let row = lib.album(a).unwrap().unwrap();
+        assert_eq!((row.sync_as, row.aac_count), (SyncAs::Aac, 1));
+        assert_eq!(lib.track(t1).unwrap().unwrap().aac, Some(copy));
+        let songs = lib.list_songs().unwrap();
+        assert_eq!(songs.iter().filter(|s| s.track.aac.is_some()).count(), 1);
+        assert_eq!(songs[0].album_title, "X");
+        lib.set_track_aac(t1, None).unwrap();
+        lib.set_album_sync_as(a, SyncAs::Flac).unwrap();
+        let row = lib.album(a).unwrap().unwrap();
+        assert_eq!((row.sync_as, row.aac_count), (SyncAs::Flac, 0));
+    }
+
+    #[test]
+    fn move_album_folder_moves_aac_paths_too() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        fs::create_dir_all(root.join("Y/Old")).unwrap();
+        fs::write(root.join("Y/Old/01 T1.flac"), b"x").unwrap();
+        fs::write(root.join("Y/Old/01 T1.m4a"), b"y").unwrap();
+        let mut lib = Library::open_in_memory(root.clone()).unwrap();
+        let mut a = album("X", "Y", None);
+        a.folder = PathBuf::from("Y/Old");
+        a.cover = None;
+        let id = lib.insert_album(&a).unwrap();
+        let t = lib.insert_track(&track(id, 1, "Y/Old")).unwrap();
+        lib.set_track_aac(t, Some(&aac(&root, "Y/Old/01 T1.m4a"))).unwrap();
+        lib.move_album_folder(id, Path::new("Y/New")).unwrap();
+        let moved = lib.track(t).unwrap().unwrap().aac.unwrap().path;
+        assert_eq!(moved, root.join("Y").join("New").join("01 T1.m4a"));
+        assert!(moved.exists());
+    }
+
+    #[test]
+    fn migrating_an_older_database_keeps_its_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("lib.db");
+        {
+            let mut conn = Connection::open(&db).unwrap();
+            run_migrations(&mut conn, &MIGRATIONS[..3]).unwrap();
+            conn.execute_batch(
+                "INSERT INTO albums (title, album_artist, folder_path, added_at) VALUES ('X', 'Y', 'Y/X', 0);
+                 INSERT INTO tracks (album_id, disc, number, title, artist, duration_ms, format, file_path, size_bytes)
+                 VALUES (1, 1, 1, 'T', 'Y', 1000, 'flac', 'Y/X/01 T.flac', 10);",
+            )
+            .unwrap();
+        }
+        let lib = Library::open(&db, dir.path().to_path_buf()).unwrap();
+        let row = lib.album(1).unwrap().unwrap();
+        assert_eq!((row.sync_as, row.aac_count, row.track_count), (SyncAs::Flac, 0, 1));
+        assert_eq!(lib.album_tracks(1).unwrap()[0].aac, None);
+    }
 }
 
 #[cfg(test)]
@@ -867,7 +1015,7 @@ mod root_record_tests {
         }
         let lib = Library::open(&db, dir.path().join("lib")).unwrap();
         let v: i64 = lib.conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
-        assert_eq!(v, 3);
+        assert_eq!(v, MIGRATIONS.len() as i64);
         assert_eq!(lib.album_count().unwrap(), 1);
         assert_eq!(lib.recorded_root().unwrap(), None);
     }
