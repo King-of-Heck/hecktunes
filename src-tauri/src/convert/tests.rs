@@ -211,3 +211,17 @@ fn events_serialize_flat_with_a_state_tag() {
     let e = ConvertEvent { album_id: 7, state: ConvertState::Converting { done: 1, total: 3 } };
     assert_eq!(serde_json::to_string(&e).unwrap(), r#"{"album_id":7,"state":"converting","done":1,"total":3}"#);
 }
+
+#[test]
+fn non_ascii_album_and_artist_names_convert() {
+    let Some(exe) = test_ffmpeg() else { return };
+    let dir = tempfile::tempdir().unwrap();
+    let mut l = Library::open_in_memory(dir.path().join("lib")).unwrap();
+    let a = add_flac_album(&mut l, dir.path(), "Jóga – 日本", "Björk", 1, 44_100, 16, false);
+    let lib = Mutex::new(l);
+    let out = convert_album(&lib, &exe, a, 1, &AtomicBool::new(false), &no_progress).unwrap();
+    assert_eq!(out, AlbumOutcome { converted: 1, failed: vec![], cancelled: false });
+    let copy = lib.lock().unwrap().album_tracks(a).unwrap()[0].aac.clone().unwrap();
+    assert!(copy.path.to_string_lossy().contains("日本"));
+    assert!(copy.path.is_file());
+}

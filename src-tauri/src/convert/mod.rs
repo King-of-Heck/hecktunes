@@ -272,7 +272,9 @@ impl ConvertService {
 
     /// An album is queued or being converted.
     pub fn is_busy(&self) -> bool {
-        self.shared.current.lock().unwrap().is_some() || !self.shared.queue.lock().unwrap().is_empty()
+        // Same lock order as the worker (queue, then current), so the two can never deadlock.
+        let q = self.shared.queue.lock().unwrap();
+        !q.is_empty() || self.shared.current.lock().unwrap().is_some()
     }
 }
 
