@@ -8,12 +8,15 @@
     playlists,
     bust = 0,
     syncEvent,
+    converting = false,
     onClearResult,
   }: {
     albums: AlbumRow[];
     playlists: PlaylistRow[];
     bust?: number;
     syncEvent: SyncEvent | null;
+    /** An AAC conversion is running: syncing waits for it. */
+    converting?: boolean;
     onClearResult: () => void;
   } = $props();
 
@@ -239,7 +242,8 @@
       {/if}
       {#if !summary.fits}<p class="err">Not enough space on the card. Untick something or free up space first.</p>{/if}
       {#each summary.warnings as w}<p class="warn">{w}</p>{/each}
-      <button class="primary" onclick={sync} disabled={!summary.fits || starting}>{starting ? 'Starting…' : 'Sync'}</button>
+      {#if converting}<p class="meta">Syncing waits for the AAC conversion to finish.</p>{/if}
+      <button class="primary" onclick={sync} disabled={!summary.fits || starting || converting}>{starting ? 'Starting…' : 'Sync'}</button>
     {/if}
     {#if actionError}<p class="err">{actionError}</p>{/if}
   </section>

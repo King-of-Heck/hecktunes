@@ -5,6 +5,7 @@ import type {
   AboutInfo,
   AlbumEdit,
   AlbumRow,
+  ConvertEvent,
   JobChoice,
   JobUpdate,
   PlanSummary,
@@ -15,6 +16,7 @@ import type {
   Selection,
   SelectionKind,
   SongRow,
+  SyncAs,
   SyncEvent,
   TrackEdit,
   TrackRow,
@@ -34,6 +36,12 @@ export const updateTrack = (trackId: number, edit: TrackEdit) => invoke<void>('u
 export const setAlbumCover = (albumId: number, path: string) => invoke<void>('set_album_cover', { albumId, path });
 export const listSongs = () => invoke<SongRow[]>('list_songs');
 export const deleteAlbum = (albumId: number) => invoke<void>('delete_album', { albumId });
+export const convertUnavailable = () => invoke<string | null>('convert_unavailable');
+export const convertAlbum = (albumId: number) => invoke<void>('convert_album', { albumId });
+export const cancelConvert = (albumId: number) => invoke<void>('cancel_convert', { albumId });
+export const removeAac = (albumId: number) => invoke<void>('remove_aac', { albumId });
+export const setAlbumSyncAs = (albumId: number, syncAs: SyncAs) => invoke<void>('set_album_sync_as', { albumId, syncAs });
+export const onConvert = (cb: (e: ConvertEvent) => void): Promise<UnlistenFn> => listen<ConvertEvent>('convert', (e) => cb(e.payload));
 
 export const listPlaylists = () => invoke<PlaylistRow[]>('list_playlists');
 export const createPlaylist = (name: string) => invoke<number>('create_playlist', { name });

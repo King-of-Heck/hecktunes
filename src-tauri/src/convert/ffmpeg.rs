@@ -8,6 +8,11 @@ use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
+/// The ffmpeg release bundled with HeckTunes (see scripts/build-ffmpeg.sh).
+pub const FFMPEG_VERSION: &str = "8.1.3";
+/// Where that release's source code is published.
+pub const FFMPEG_SOURCE: &str = "https://ffmpeg.org/releases/ffmpeg-8.1.3.tar.xz";
+
 /// The bitrate every conversion uses.
 pub const BITRATE: &str = "256k";
 /// One track taking longer than this is stopped (a stuck ffmpeg, not a long track: encoding runs

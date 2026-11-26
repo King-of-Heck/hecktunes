@@ -35,6 +35,22 @@
     </section>
 
     <section>
+      <h3>FFmpeg {info.ffmpeg_version}</h3>
+      <p>
+        Convert to AAC uses FFmpeg, a separate program built for HeckTunes with only what conversion needs (the FLAC
+        decoder and FFmpeg's own AAC encoder). This build is free software under the GNU Lesser General Public License
+        v2.1 or later.
+        <button class="link" onclick={() => open(info!.ffmpeg_source)}>Its source code</button>
+      </p>
+      <p class="meta">Each HeckTunes release page also carries a copy of FFmpeg's source code.</p>
+      {#if info.ffmpeg_license}
+        <details><summary>FFmpeg licence (LGPL v2.1)</summary><pre>{info.ffmpeg_license}</pre></details>
+      {:else}
+        <p class="warn">The FFmpeg licence file is missing from this build.</p>
+      {/if}
+    </section>
+
+    <section>
       <h3>Open-source components</h3>
       {#if info.third_party_notices}
         <details><summary>Third-party notices</summary><pre>{info.third_party_notices}</pre></details>

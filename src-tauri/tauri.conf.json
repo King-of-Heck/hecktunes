@@ -33,6 +33,7 @@
     "externalBin": ["binaries/echo-sync", "binaries/ffmpeg"],
     "resources": {
       "licenses/echo-sync-LICENSE.txt": "licenses/echo-sync-LICENSE.txt",
+      "licenses/ffmpeg-LICENSE.txt": "licenses/ffmpeg-LICENSE.txt",
       "licenses/THIRD_PARTY_NOTICES.md": "licenses/THIRD_PARTY_NOTICES.md"
     },
     "icon": [

@@ -9,6 +9,19 @@ export interface AlbumRow {
   cover_path: string | null;
   needs_metadata: boolean;
   track_count: number;
+  /** Which files go to the Echo Mini: the FLAC files or their AAC copies. */
+  sync_as: SyncAs;
+  /** Tracks that have an AAC copy. */
+  aac_count: number;
+}
+
+export type SyncAs = 'flac' | 'aac';
+
+/** A track's AAC copy (Convert to AAC). */
+export interface AacCopy {
+  path: string;
+  size: number;
+  hash: string;
 }
 
 export interface TrackRow {
@@ -24,6 +37,7 @@ export interface TrackRow {
   size_bytes: number;
   mb_recording_id: string | null;
   content_hash: string | null;
+  aac: AacCopy | null;
 }
 
 /** A track plus its album's fields (flat, as serialized by Rust). */
@@ -196,6 +210,20 @@ export type SyncEvent =
   | { state: 'finished'; outcome: SyncOutcome; echo_sync: EchoSyncOutcome | null; warnings: string[] }
   | { state: 'failed'; error: string };
 
+export interface ConvertFailure {
+  title: string;
+  error: string;
+}
+
+/** Progress of Convert to AAC for one album. */
+export type ConvertEvent = { album_id: number } & (
+  | { state: 'queued' }
+  | { state: 'converting'; done: number; total: number }
+  | { state: 'finished'; converted: number; failed: ConvertFailure[] }
+  | { state: 'cancelled'; converted: number }
+  | { state: 'failed'; error: string }
+);
+
 export type View =
   | { kind: 'albums' }
   | { kind: 'artists'; artist?: string }
@@ -246,6 +274,9 @@ export interface AboutInfo {
   echo_sync_version: string;
   echo_sync_source: string;
   echo_sync_license: string | null;
+  ffmpeg_version: string;
+  ffmpeg_source: string;
+  ffmpeg_license: string | null;
   third_party_notices: string | null;
   hecktunes_license: string | null;
 }

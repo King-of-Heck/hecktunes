@@ -2,7 +2,7 @@
   import { onMount } from 'svelte';
   import * as api from './lib/api';
   import { reducePlayerEvent } from './lib/playerQueue';
-  import type { AlbumRow, JobUpdate, PlayerStatus, PlaylistRow, QueueItem, SyncEvent, TrackRow, View } from './lib/types';
+  import type { AlbumRow, ConvertEvent, JobUpdate, PlayerStatus, PlaylistRow, QueueItem, SyncEvent, TrackRow, View } from './lib/types';
   import NowPlaying from './lib/components/NowPlaying.svelte';
   import SyncPanel from './lib/components/SyncPanel.svelte';
   import ReleasePicker from './lib/components/ReleasePicker.svelte';
@@ -36,6 +36,16 @@
   // Set when the library folder was missing at startup (e.g. its drive isn't connected).
   let libraryUnavailable = $state<string | null>(null);
   const syncing = $derived(syncEvent !== null && syncEvent.state !== 'finished' && syncEvent.state !== 'failed');
+  // Latest Convert to AAC event per album.
+  let converts = $state<Record<number, ConvertEvent>>({});
+  const converting = $derived(Object.values(converts).some((e) => e.state === 'queued' || e.state === 'converting'));
+  // Library files can't change while a sync reads them or a conversion works beside them.
+  const libraryBusy = $derived(syncing || converting);
+
+  function onConvert(e: ConvertEvent) {
+    converts[e.album_id] = e;
+    if (e.state === 'finished' || e.state === 'cancelled' || e.state === 'failed') refresh().catch(logError('refresh failed'));
+  }
 
   const needs = $derived(albums.filter((a) => a.needs_metadata));
   const artistName = $derived(view.kind === 'artists' ? (view.artist ?? null) : null);
@@ -207,6 +217,7 @@
     const unlisten = [
       api.onImportJob(onJob),
       api.onSync((e) => (syncEvent = e)),
+      api.onConvert(onConvert),
       api.onPlayer(onPlayer),
       api.onFileDrop({
         hover: (on) => (hovering = on),
@@ -236,12 +247,15 @@
           {playlists}
           retryJobId={retryJobs[selected.id] ?? null}
           {syncing}
+          {converting}
+          convert={converts[selected.id] ?? null}
           {nowPlayingId}
           onPlay={playFrom}
           onRetry={() => retry(selected.id)}
           onBack={() => (selectedId = null)}
           onEdit={(t) => (editing = t)}
           onPlaylistsChanged={refreshPlaylists}
+          onChanged={refresh}
           onRemoved={async () => {
             selectedId = null;
             await refresh();
@@ -270,7 +284,7 @@
         {/key}
       {/if}
     {:else if view.kind === 'device'}
-      <SyncPanel {albums} {playlists} {bust} {syncEvent} onClearResult={() => (syncEvent = null)} />
+      <SyncPanel {albums} {playlists} {bust} {syncEvent} {converting} onClearResult={() => (syncEvent = null)} />
     {:else if view.kind === 'tools'}
       <ToolsView onImportVinyl={importVinyl} />
     {:else if view.kind === 'settings'}
@@ -294,19 +308,19 @@
 <ImportTray jobs={jobList} raised={nowPlaying !== null} onClear={clearFinished} />
 {#if waiting}
   {#key waiting.job_id}
-    <ReleasePicker job={waiting} {syncing} />
+    <ReleasePicker job={waiting} syncing={libraryBusy} />
   {/key}
 {/if}
 {#if reviewing}
   <!-- Hidden, not unmounted, while another import needs a choice, so the user's edits survive. -->
   <div hidden={waiting !== null}>
     {#key reviewing.job_id}
-      <VinylReview job={reviewing} {syncing} />
+      <VinylReview job={reviewing} syncing={libraryBusy} />
     {/key}
   </div>
 {/if}
 {#if editing && selected}
-  <TagEditor album={selected} tracks={editing} {syncing} onClose={(changed) => { editing = null; if (changed) refresh().catch(logError('refresh failed')); }} />
+  <TagEditor album={selected} tracks={editing} syncing={libraryBusy} onClose={(changed) => { editing = null; if (changed) refresh().catch(logError('refresh failed')); }} />
 {/if}
 
 <style>

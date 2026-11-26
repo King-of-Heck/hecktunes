@@ -6,6 +6,8 @@
 # the file protocol, the FLAC demuxer/parser/decoder, the resampler, the native AAC encoder and the
 # mp4/ipod muxers. Its source is the pinned release tarball below, checked against its SHA-256.
 #
+# Keep VERSION in step with FFMPEG_VERSION in src-tauri/src/convert/ffmpeg.rs.
+#
 # Usage: scripts/build-ffmpeg.sh [<target-triple>]   (default: the host's rustc triple)
 #   Windows: run in an MSYS2 CLANG64 shell (needs make and clang): the binary is linked statically.
 #   macOS:   needs the Xcode command-line tools; x86_64-apple-darwin is cross-built on Apple silicon.
@@ -77,4 +79,7 @@ make -j"$jobs" ffmpeg$exe
 if command -v strip >/dev/null; then strip "ffmpeg$exe" 2>/dev/null || true; fi
 cp "ffmpeg$exe" "$out"
 chmod 755 "$out"
+# The build is LGPL-2.1-or-later; its licence ships beside HeckTunes' other notices.
+mkdir -p "$root/src-tauri/licenses"
+cp COPYING.LGPLv2.1 "$root/src-tauri/licenses/ffmpeg-LICENSE.txt"
 echo "ffmpeg $VERSION (LGPL, AAC-only build) saved to $out"
