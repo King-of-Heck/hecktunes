@@ -2,7 +2,7 @@
   import { onMount } from 'svelte';
   import * as api from '../api';
   import { coverUrl, formatBytes } from '../api';
-  import type { AlbumRow, PlanSummary, PlaylistRow, Selection, SelectionKind, SyncEvent, Volume } from '../types';
+  import type { AlbumRow, PlanSummary, PlaylistRow, Selection, SelectionKind, SyncAs, SyncEvent, Volume } from '../types';
   let {
     albums,
     playlists,
@@ -10,6 +10,7 @@
     syncEvent,
     converting = false,
     onClearResult,
+    onAlbumsChanged,
   }: {
     albums: AlbumRow[];
     playlists: PlaylistRow[];
@@ -18,6 +19,8 @@
     /** An AAC conversion is running: syncing waits for it. */
     converting?: boolean;
     onClearResult: () => void;
+    /** An album's FLAC/AAC choice changed: reload the albums. */
+    onAlbumsChanged: () => Promise<void>;
   } = $props();
 
   let volumes = $state<Volume[]>([]);
@@ -68,10 +71,14 @@
     api.getSelection().then((s) => (selection = s)).catch((e) => (previewError = String(e)));
   });
 
-  // Re-plan whenever the card or the ticks change, and again when a sync ends.
+  // Bumped when an album switches between FLAC and AAC, which changes the plan.
+  let replan = $state(0);
+
+  // Re-plan whenever the card, the ticks or an album's format change, and again when a sync ends.
   $effect(() => {
     const c = card;
     void selection;
+    void replan;
     // Bump first, so a preview still in flight can't land after this point.
     const seq = ++previewSeq;
     if (c === null || running) {
@@ -106,6 +113,17 @@
     try {
       await api.setSelected(kind, reference, on);
       selection = await api.getSelection();
+    } catch (e) {
+      actionError = String(e);
+    }
+  }
+
+  async function chooseFormat(albumId: number, to: SyncAs) {
+    actionError = null;
+    try {
+      await api.setAlbumSyncAs(albumId, to);
+      await onAlbumsChanged();
+      replan++;
     } catch (e) {
       actionError = String(e);
     }
@@ -217,6 +235,20 @@
                     title={whole ? `Included because all of ${a.name} is ticked` : undefined}
                     onchange={(e) => toggle('album', String(al.id), e.currentTarget.checked)}
                   />
+                  {#if al.aac_count > 0}
+                    <!-- After the checkbox in the markup, so the label still ticks the checkbox; shown before it. -->
+                    <select
+                      class="format"
+                      value={al.sync_as}
+                      disabled={running}
+                      aria-label={`Files of ${al.title} to put on the HeckPod`}
+                      title={al.aac_count < al.track_count ? `${al.aac_count} of ${al.track_count} songs have an AAC copy; the rest go as FLAC` : undefined}
+                      onchange={(e) => chooseFormat(al.id, e.currentTarget.value as SyncAs)}
+                    >
+                      <option value="flac">FLAC</option>
+                      <option value="aac">AAC</option>
+                    </select>
+                  {/if}
                 </label>
               {/each}
             </div>
@@ -329,6 +361,8 @@
   .album.locked { cursor: default; }
   .album img, .album .noart { width: 52px; height: 52px; flex: none; border-radius: 6px; object-fit: cover; }
   .album .name { font-weight: 500; }
+  .album input[type='checkbox'] { order: 2; }
+  .format { flex: none; order: 1; font-size: 12px; padding: 1px 2px; }
   .sub, .meta { color: var(--muted); font-size: 13px; }
   .err { color: var(--danger); }
   .warn { color: var(--warn); }

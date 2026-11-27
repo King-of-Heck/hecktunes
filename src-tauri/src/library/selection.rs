@@ -21,7 +21,7 @@ impl SelectionKind {
     }
 }
 
-/// What is ticked for the Echo Mini: albums and playlists by id, artists by album-artist name.
+/// What is ticked for the HeckPod: albums and playlists by id, artists by album-artist name.
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct Selection {
     pub albums: Vec<i64>,
@@ -63,7 +63,7 @@ impl Library {
     }
 
     /// Before album `from` is replaced by `to` (Fix metadata / Replace), moves its playlist lines and
-    /// its Echo Mini tick to the new album. Tracks pair up by (disc, number), else by position.
+    /// its HeckPod tick to the new album. Tracks pair up by (disc, number), else by position.
     pub fn transfer_album_refs(&mut self, from: i64, to: i64) -> Result<()> {
         let old = self.album_tracks(from)?;
         let new = self.album_tracks(to)?;

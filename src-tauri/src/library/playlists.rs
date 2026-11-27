@@ -85,7 +85,7 @@ impl Library {
         Ok(())
     }
 
-    /// Deletes the playlist (its songs stay in the library) and its Echo Mini tick.
+    /// Deletes the playlist (its songs stay in the library) and its HeckPod tick.
     pub fn delete_playlist(&mut self, id: i64) -> Result<()> {
         let tx = self.conn.transaction()?;
         tx.execute("DELETE FROM device_selection WHERE kind = 'playlist' AND ref = ?1", [id.to_string()])?;

@@ -284,7 +284,7 @@
         {/key}
       {/if}
     {:else if view.kind === 'device'}
-      <SyncPanel {albums} {playlists} {bust} {syncEvent} {converting} onClearResult={() => (syncEvent = null)} />
+      <SyncPanel {albums} {playlists} {bust} {syncEvent} {converting} onClearResult={() => (syncEvent = null)} onAlbumsChanged={refresh} />
     {:else if view.kind === 'tools'}
       <ToolsView onImportVinyl={importVinyl} />
     {:else if view.kind === 'settings'}

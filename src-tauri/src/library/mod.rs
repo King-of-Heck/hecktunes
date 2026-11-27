@@ -119,7 +119,7 @@ pub struct AlbumRow {
     pub cover_path: Option<PathBuf>,
     pub needs_metadata: bool,
     pub track_count: u32,
-    /// Which files go to the Echo Mini: `flac` (the main files) or `aac` (the AAC copies).
+    /// Which files go to the HeckPod: `flac` (the main files) or `aac` (the AAC copies).
     pub sync_as: SyncAs,
     /// Tracks that have an AAC copy.
     pub aac_count: u32,

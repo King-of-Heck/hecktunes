@@ -1,8 +1,8 @@
 <script lang="ts">
   import { inControl } from '../rows';
   import { onMount } from 'svelte';
-  import { albumTracks, cancelConvert, convertAlbum, convertUnavailable, coverUrl, deleteAlbum, formatDuration, removeAac, setAlbumSyncAs } from '../api';
-  import type { AlbumRow, ConvertEvent, ConvertOptions, JobUpdate, PlaylistRow, QueueItem, SyncAs, TrackRow } from '../types';
+  import { albumTracks, cancelConvert, convertAlbum, convertUnavailable, coverUrl, deleteAlbum, formatDuration, removeAac } from '../api';
+  import type { AlbumRow, ConvertEvent, ConvertOptions, JobUpdate, PlaylistRow, QueueItem, TrackRow } from '../types';
   import AddToPlaylist from './AddToPlaylist.svelte';
   import ConvertMenu from './ConvertMenu.svelte';
   let {
@@ -41,7 +41,7 @@
     onEdit: (tracks: TrackRow[]) => void;
     onPlaylistsChanged: () => Promise<void>;
     onRemoved: () => Promise<void>;
-    /** The album row changed (sync choice, AAC copies removed): reload it. */
+    /** The album row changed (AAC copies removed): reload it. */
     onChanged: () => Promise<void>;
   } = $props();
 
@@ -85,9 +85,6 @@
   }
   const startConvert = (options: ConvertOptions) => aac(() => convertAlbum(album.id, options), false);
   const stopConvert = () => aac(() => cancelConvert(album.id), false);
-  function chooseSync(to: SyncAs) {
-    if (to !== album.sync_as) aac(() => setAlbumSyncAs(album.id, to), true);
-  }
   async function dropCopies() {
     await aac(() => removeAac(album.id), true);
     confirmingRemoveAac = false;
@@ -152,37 +149,30 @@
         {#if !active && missing > 0}
           <ConvertMenu label={convertLabel} disabled={aacWorking || syncing || unavailable !== null} onConvert={startConvert} />
         {/if}
+        {#if !active && album.aac_count > 0 && !confirmingRemoveAac}
+          <button onclick={() => (confirmingRemoveAac = true)} disabled={aacWorking || busy}>Remove AAC copies</button>
+        {/if}
         {#if !confirming}<button onclick={() => (confirming = true)} disabled={busy}>Remove from library</button>{/if}
       </div>
       {#if busy}<p class="meta">{busyNote}</p>{/if}
       {#if flacTracks.length > 0}
-        {#if active || album.aac_count > 0}
-        <div class="aac">
-          {#if active && convert}
+        {#if active && convert}
+          <div class="aac">
             <span class="progress">
               {#if convert.state === 'converting'}Converting to AAC… {convert.done} of {convert.total}{:else}Waiting to convert to AAC…{/if}
             </span>
             <button onclick={stopConvert} disabled={aacWorking}>Cancel</button>
-          {:else}
-            {#if album.aac_count > 0}
-              <span class="label">Echo Mini gets</span>
-              <span class="seg" role="group" aria-label="Files to sync">
-                <button class:on={album.sync_as === 'flac'} aria-pressed={album.sync_as === 'flac'} onclick={() => chooseSync('flac')} disabled={aacWorking}>FLAC</button>
-                <button class:on={album.sync_as === 'aac'} aria-pressed={album.sync_as === 'aac'} onclick={() => chooseSync('aac')} disabled={aacWorking}>AAC</button>
-              </span>
-            {/if}
-            {#if album.aac_count > 0 && !confirmingRemoveAac}
-              <button onclick={() => (confirmingRemoveAac = true)} disabled={aacWorking || busy}>Remove AAC copies</button>
-            {/if}
-          {/if}
-        </div>
+          </div>
         {/if}
         {#if album.aac_count > 0 && !active}
-          <p class="meta">{album.aac_count} of {flacTracks.length} tracks have an AAC copy beside the FLAC.</p>
+          <p class="meta">
+            {album.aac_count} of {flacTracks.length} tracks have an AAC copy beside the FLAC. The HeckPod gets the
+            {album.sync_as === 'aac' ? 'AAC' : 'FLAC'} files; change that on the HeckPod page.
+          </p>
         {/if}
         {#if confirmingRemoveAac}
           <p class="confirm">
-            Delete this album's AAC copies? The FLAC files stay, and the Echo Mini gets them again at the next sync.
+            Delete this album's AAC copies? The FLAC files stay, and the HeckPod gets them again at the next sync.
             <button class="danger" onclick={dropCopies} disabled={aacWorking || busy}>Delete copies</button>
             <button onclick={() => (confirmingRemoveAac = false)} disabled={aacWorking}>Cancel</button>
           </p>
@@ -243,12 +233,7 @@
   .danger { background: var(--danger); color: #fff; border-color: var(--danger); }
   .add { width: 1%; white-space: nowrap; }
   .aac { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-top: 10px; }
-  .aac .label, .progress { color: var(--muted); }
-  .seg { display: inline-flex; }
-  .seg button { border-radius: 0; }
-  .seg button:first-child { border-radius: var(--radius) 0 0 var(--radius); }
-  .seg button:last-child { border-radius: 0 var(--radius) var(--radius) 0; margin-left: -1px; }
-  .seg button.on { background: var(--accent); color: #fff; border-color: var(--accent); }
+  .progress { color: var(--muted); }
   .err ul { margin: 4px 0 0; padding-left: 18px; }
   table { width: 100%; border-collapse: collapse; }
   td { padding: 7px 8px; border-bottom: 1px solid var(--border); }

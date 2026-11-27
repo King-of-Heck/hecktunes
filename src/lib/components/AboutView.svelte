@@ -22,7 +22,7 @@
     <section>
       <h3>echo-sync {info.echo_sync_version}</h3>
       <p>
-        HeckTunes runs echo-sync, a separate program from the EchoPod project, after each sync so the Echo Mini doesn't
+        HeckTunes runs echo-sync, a separate program from the EchoPod project, after each sync so the HeckPod doesn't
         have to rescan the card. echo-sync is free software under the GNU General Public License v3.
         <button class="link" onclick={() => open(info!.echo_sync_source)}>Its source code</button>
       </p>

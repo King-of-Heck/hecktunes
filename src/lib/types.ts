@@ -9,7 +9,7 @@ export interface AlbumRow {
   cover_path: string | null;
   needs_metadata: boolean;
   track_count: number;
-  /** Which files go to the Echo Mini: the FLAC files or their AAC copies. */
+  /** Which files go to the HeckPod: the FLAC files or their AAC copies. */
   sync_as: SyncAs;
   /** Tracks that have an AAC copy. */
   aac_count: number;
@@ -20,7 +20,7 @@ export type SyncAs = 'flac' | 'aac';
 /** Choices made when starting Convert to AAC. */
 export interface ConvertOptions {
   bitrate_kbps: number;
-  /** Have the Echo Mini get the AAC copies once the conversion finishes. */
+  /** Have the HeckPod get the AAC copies once the conversion finishes. */
   switch_to_aac: boolean;
 }
 

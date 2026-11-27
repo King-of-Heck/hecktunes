@@ -44,7 +44,7 @@
       "icons/icon.ico"
     ],
     "category": "Music",
-    "shortDescription": "Music library and Echo Mini sync",
-    "longDescription": "HeckTunes keeps your music library tidy (tags and album art fixed on import), manages playlists, and syncs a chosen part of it to a Snowsky Echo Mini running EchoPod."
+    "shortDescription": "Music library and HeckPod sync",
+    "longDescription": "HeckTunes keeps your music library tidy (tags and album art fixed on import), manages playlists, and syncs a chosen part of it to your HeckPod (a Snowsky Echo Mini running EchoPod or HeckPod firmware)."
   }
 }

@@ -157,11 +157,11 @@ pub fn vinyl_preview(state: State<AppState>, path: String, at_ms: u64) -> CmdRes
     Ok(())
 }
 
-/// Library files must not be rewritten or deleted while an Echo Mini sync reads them, or while
+/// Library files must not be rewritten or deleted while an HeckPod sync reads them, or while
 /// albums are being converted to AAC (ffmpeg reads the FLACs and writes beside them).
 fn library_change_allowed(syncing: bool, converting: bool) -> Result<(), String> {
     if syncing {
-        Err("Wait for the Echo Mini sync to finish first.".to_string())
+        Err("Wait for the HeckPod sync to finish first.".to_string())
     } else if converting {
         Err("Wait for the AAC conversion to finish first.".to_string())
     } else {
@@ -275,7 +275,7 @@ pub fn convert_unavailable(state: State<AppState>) -> Option<String> {
 pub fn convert_album(state: State<AppState>, album_id: i64, options: crate::convert::ConvertOptions) -> CmdResult<()> {
     library_ready(&state)?;
     if state.sync.is_running() {
-        return Err("Wait for the Echo Mini sync to finish first.".to_string());
+        return Err("Wait for the HeckPod sync to finish first.".to_string());
     }
     state.convert.enqueue(album_id, options).map_err(err)
 }
@@ -293,7 +293,7 @@ pub fn remove_aac(state: State<AppState>, album_id: i64) -> CmdResult<()> {
     crate::convert::remove_copies(&mut state.lib.lock().unwrap(), album_id).map(|_| ()).map_err(err)
 }
 
-/// Chooses whether the album's FLAC files or its AAC copies go to the Echo Mini.
+/// Chooses whether the album's FLAC files or its AAC copies go to the HeckPod.
 #[tauri::command(async)]
 pub fn set_album_sync_as(state: State<AppState>, album_id: i64, sync_as: SyncAs) -> CmdResult<()> {
     library_ready(&state)?;
@@ -443,8 +443,8 @@ mod guard_tests {
     #[test]
     fn library_changes_are_refused_only_while_syncing() {
         assert!(library_change_allowed(false, false).is_ok());
-        assert_eq!(library_change_allowed(true, false).unwrap_err(), "Wait for the Echo Mini sync to finish first.");
-        assert_eq!(library_change_allowed(true, true).unwrap_err(), "Wait for the Echo Mini sync to finish first.");
+        assert_eq!(library_change_allowed(true, false).unwrap_err(), "Wait for the HeckPod sync to finish first.");
+        assert_eq!(library_change_allowed(true, true).unwrap_err(), "Wait for the HeckPod sync to finish first.");
         assert_eq!(library_change_allowed(false, true).unwrap_err(), "Wait for the AAC conversion to finish first.");
     }
 

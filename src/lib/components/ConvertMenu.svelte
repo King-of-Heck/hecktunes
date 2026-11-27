@@ -66,7 +66,7 @@
       </label>
       <label class="check">
         <input type="checkbox" bind:checked={options.switch_to_aac} />
-        Echo Mini gets the AAC files afterwards
+        HeckPod gets the AAC files afterwards
       </label>
       <div class="buttons">
         <button type="button" onclick={() => (open = false)}>Cancel</button>
