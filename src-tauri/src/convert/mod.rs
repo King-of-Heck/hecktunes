@@ -23,13 +23,11 @@ pub const BITRATES: [u32; 5] = [128, 160, 192, 256, 320];
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConvertOptions {
     pub bitrate_kbps: u32,
-    /// Set the album to sync its AAC copies once the conversion finishes.
-    pub switch_to_aac: bool,
 }
 
 impl Default for ConvertOptions {
     fn default() -> Self {
-        Self { bitrate_kbps: 256, switch_to_aac: true }
+        Self { bitrate_kbps: 256 }
     }
 }
 
@@ -106,9 +104,8 @@ struct Work {
 }
 
 /// Converts every track of the album that still needs it, `workers` at a time. Each finished
-/// copy is recorded right away; `progress(done, total)` follows along. When at least one track
-/// was converted, the run wasn't cancelled and `opts.switch_to_aac` is set, the album is set to
-/// sync as AAC.
+/// copy is recorded right away; `progress(done, total)` follows along. Whether the HeckPod gets
+/// the AAC copies is the album's own setting, chosen on the HeckPod page; converting leaves it.
 pub fn convert_album(
     lib: &Mutex<Library>,
     exe: &Path,
@@ -177,9 +174,6 @@ pub fn convert_album(
         }
     });
     let cancelled = cancel.load(Ordering::SeqCst);
-    if converted > 0 && !cancelled && opts.switch_to_aac {
-        lib.lock().unwrap().set_album_sync_as(album_id, SyncAs::Aac)?;
-    }
     Ok(AlbumOutcome { converted, failed, cancelled })
 }
 

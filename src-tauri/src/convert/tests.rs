@@ -61,7 +61,7 @@ pub(crate) fn add_flac_album(lib: &mut Library, parent: &Path, album: &str, arti
 fn no_progress(_: usize, _: usize) {}
 
 #[test]
-fn converting_an_album_makes_tagged_256k_copies_and_switches_it_to_aac() {
+fn converting_an_album_makes_tagged_256k_copies_and_leaves_it_syncing_flac() {
     let Some(exe) = test_ffmpeg() else { return };
     let dir = tempfile::tempdir().unwrap();
     let mut l = Library::open_in_memory(dir.path().join("lib")).unwrap();
@@ -74,7 +74,7 @@ fn converting_an_album_makes_tagged_256k_copies_and_switches_it_to_aac() {
 
     let l = lib.lock().unwrap();
     let row = l.album(a).unwrap().unwrap();
-    assert_eq!((row.sync_as, row.aac_count), (SyncAs::Aac, 2));
+    assert_eq!((row.sync_as, row.aac_count), (SyncAs::Flac, 2), "the HeckPod page chooses AAC");
     for t in l.album_tracks(a).unwrap() {
         let c = t.aac.clone().expect("track has an AAC copy");
         assert_eq!(c.path, t.file_path.with_extension("m4a"));
@@ -96,18 +96,18 @@ fn converting_an_album_makes_tagged_256k_copies_and_switches_it_to_aac() {
 }
 
 #[test]
-fn the_chosen_bitrate_is_used_and_the_album_can_stay_on_flac() {
+fn the_chosen_bitrate_is_used() {
     let Some(exe) = test_ffmpeg() else { return };
     let dir = tempfile::tempdir().unwrap();
     let mut l = Library::open_in_memory(dir.path().join("lib")).unwrap();
     let a = add_flac_album(&mut l, dir.path(), "Small", "Band", 1, 44_100, 16, false);
     let lib = Mutex::new(l);
-    let opts = ConvertOptions { bitrate_kbps: 128, switch_to_aac: false };
+    let opts = ConvertOptions { bitrate_kbps: 128 };
     let out = convert_album(&lib, &exe, a, &opts, 1, &AtomicBool::new(false), &no_progress).unwrap();
     assert_eq!(out.converted, 1);
     let l = lib.lock().unwrap();
     let row = l.album(a).unwrap().unwrap();
-    assert_eq!((row.sync_as, row.aac_count), (SyncAs::Flac, 1), "converted, but still syncing FLAC");
+    assert_eq!(row.aac_count, 1);
     let copy = l.album_tracks(a).unwrap()[0].aac.clone().unwrap();
     let kbps = lofty::read_from_path(&copy.path).unwrap().properties().audio_bitrate().unwrap_or(0);
     assert!((100..=160).contains(&kbps), "about 128 kbps, got {kbps}");
@@ -117,12 +117,12 @@ fn the_chosen_bitrate_is_used_and_the_album_can_stay_on_flac() {
 fn bitrates_outside_the_offered_list_are_refused() {
     assert!(ConvertOptions::default().validate().is_ok());
     for kbps in BITRATES {
-        assert!(ConvertOptions { bitrate_kbps: kbps, switch_to_aac: true }.validate().is_ok());
+        assert!(ConvertOptions { bitrate_kbps: kbps }.validate().is_ok());
     }
-    let e = ConvertOptions { bitrate_kbps: 300, switch_to_aac: true }.validate().unwrap_err();
+    let e = ConvertOptions { bitrate_kbps: 300 }.validate().unwrap_err();
     assert!(e.to_string().contains("300 kbps"), "{e}");
     let svc = ConvertService::start(Arc::new(Mutex::new(Library::open_in_memory(PathBuf::from("lib")).unwrap())), Some(PathBuf::from("ffmpeg")), 1, |_| {});
-    assert!(svc.enqueue(1, ConvertOptions { bitrate_kbps: 64, switch_to_aac: true }).is_err());
+    assert!(svc.enqueue(1, ConvertOptions { bitrate_kbps: 64 }).is_err());
     assert!(!svc.is_busy(), "a refused album isn't queued");
 }
 

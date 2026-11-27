@@ -8,13 +8,13 @@
 
   const BITRATES = [128, 160, 192, 256, 320];
   const KEY = 'hecktunes.convertOptions';
-  const DEFAULTS: ConvertOptions = { bitrate_kbps: 256, switch_to_aac: true };
+  const DEFAULTS: ConvertOptions = { bitrate_kbps: 256 };
 
   // The last choices, so the next album starts from them.
   function remembered(): ConvertOptions {
     try {
       const saved = JSON.parse(localStorage.getItem(KEY) ?? 'null');
-      if (saved && BITRATES.includes(saved.bitrate_kbps) && typeof saved.switch_to_aac === 'boolean') return saved;
+      if (saved && BITRATES.includes(saved.bitrate_kbps)) return { bitrate_kbps: saved.bitrate_kbps };
     } catch {
       // Unreadable: fall back to the defaults.
     }
@@ -64,10 +64,6 @@
           {#each BITRATES as b}<option value={b}>{b} kbps</option>{/each}
         </select>
       </label>
-      <label class="check">
-        <input type="checkbox" bind:checked={options.switch_to_aac} />
-        HeckPod gets the AAC files afterwards
-      </label>
       <div class="buttons">
         <button type="button" onclick={() => (open = false)}>Cancel</button>
         <button type="submit" class="primary">Convert</button>
@@ -83,7 +79,6 @@
   .pop { position: absolute; left: 0; top: calc(100% + 4px); z-index: 30; background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); padding: 10px; display: flex; flex-direction: column; gap: 10px; box-shadow: 0 6px 20px rgba(0, 0, 0, 0.18); }
   .pop.right { left: auto; right: 0; }
   label { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
-  .check { justify-content: flex-start; gap: 6px; white-space: nowrap; }
   .buttons { display: flex; justify-content: flex-end; gap: 6px; }
   .primary { background: var(--accent); color: #fff; border-color: var(--accent); }
 </style>
