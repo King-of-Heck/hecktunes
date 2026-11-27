@@ -1,4 +1,4 @@
-//! Convert to AAC: 256 kbps .m4a copies of an album's FLAC tracks, saved beside them.
+//! Convert to AAC: .m4a copies of an album's FLAC tracks, saved beside them.
 
 pub mod ffmpeg;
 
@@ -9,12 +9,38 @@ use crate::model::TrackTags;
 use crate::tags::write_tags;
 use anyhow::{anyhow, bail, Result};
 use lofty::prelude::*;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::{HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Condvar, Mutex};
+
+/// The bitrates offered, in kbps. AAC-LC stereo stays sensible over this whole range.
+pub const BITRATES: [u32; 5] = [128, 160, 192, 256, 320];
+
+/// What the user chose when starting a conversion.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConvertOptions {
+    pub bitrate_kbps: u32,
+    /// Set the album to sync its AAC copies once the conversion finishes.
+    pub switch_to_aac: bool,
+}
+
+impl Default for ConvertOptions {
+    fn default() -> Self {
+        Self { bitrate_kbps: 256, switch_to_aac: true }
+    }
+}
+
+impl ConvertOptions {
+    pub fn validate(&self) -> Result<()> {
+        if !BITRATES.contains(&self.bitrate_kbps) {
+            bail!("{} kbps isn't one of the offered bitrates.", self.bitrate_kbps);
+        }
+        Ok(())
+    }
+}
 
 /// Where a track's AAC copy goes: beside it, same name, `.m4a`.
 pub fn aac_path_for(source: &Path) -> PathBuf {
@@ -38,7 +64,7 @@ pub fn needs_converting(t: &TrackRow) -> bool {
 
 /// Encodes `source` with ffmpeg, writes `tags` (and the cover) into the result, then renames it
 /// into place beside the source. Nothing is left behind when it fails or is cancelled.
-pub fn convert_track(exe: &Path, source: &Path, tags: &TrackTags, cover: Option<&[u8]>, cancel: &AtomicBool) -> Result<AacCopy> {
+pub fn convert_track(exe: &Path, source: &Path, kbps: u32, tags: &TrackTags, cover: Option<&[u8]>, cancel: &AtomicBool) -> Result<AacCopy> {
     let rate = lofty::read_from_path(source)
         .map_err(|e| anyhow!("couldn't read {}: {e}", source.display()))?
         .properties()
@@ -47,7 +73,7 @@ pub fn convert_track(exe: &Path, source: &Path, tags: &TrackTags, cover: Option<
     let tmp = temp_path_for(source);
     let dest = aac_path_for(source);
     let made = (|| -> Result<()> {
-        ffmpeg::run(exe, &ffmpeg::args(source, &tmp, ffmpeg::target_rate(rate)), cancel)?;
+        ffmpeg::run(exe, &ffmpeg::args(source, &tmp, kbps, ffmpeg::target_rate(rate)), cancel)?;
         write_tags(&tmp, tags, cover)?;
         std::fs::rename(&tmp, &dest).map_err(|e| anyhow!("couldn't save {}: {e}", dest.display()))?;
         Ok(())
@@ -81,15 +107,18 @@ struct Work {
 
 /// Converts every track of the album that still needs it, `workers` at a time. Each finished
 /// copy is recorded right away; `progress(done, total)` follows along. When at least one track
-/// was converted and the run wasn't cancelled, the album is set to sync as AAC.
+/// was converted, the run wasn't cancelled and `opts.switch_to_aac` is set, the album is set to
+/// sync as AAC.
 pub fn convert_album(
     lib: &Mutex<Library>,
     exe: &Path,
     album_id: i64,
+    opts: &ConvertOptions,
     workers: usize,
     cancel: &AtomicBool,
     progress: &dyn Fn(usize, usize),
 ) -> Result<AlbumOutcome> {
+    opts.validate()?;
     let (todo, cover, mut failed) = {
         let l = lib.lock().unwrap();
         let album = l.album(album_id)?.ok_or_else(|| anyhow!("That album is no longer in the library."))?;
@@ -122,7 +151,7 @@ pub fn convert_album(
                 }
                 let i = next.fetch_add(1, Ordering::SeqCst);
                 let Some(w) = todo.get(i) else { break };
-                let r = convert_track(exe, &w.track.file_path, &w.tags, cover, cancel);
+                let r = convert_track(exe, &w.track.file_path, opts.bitrate_kbps, &w.tags, cover, cancel);
                 if tx.send((i, r)).is_err() {
                     break;
                 }
@@ -148,7 +177,7 @@ pub fn convert_album(
         }
     });
     let cancelled = cancel.load(Ordering::SeqCst);
-    if converted > 0 && !cancelled {
+    if converted > 0 && !cancelled && opts.switch_to_aac {
         lib.lock().unwrap().set_album_sync_as(album_id, SyncAs::Aac)?;
     }
     Ok(AlbumOutcome { converted, failed, cancelled })
@@ -196,7 +225,7 @@ struct Shared {
     ffmpeg: Option<PathBuf>,
     workers: usize,
     /// Albums waiting, in order; the one being converted is in `current`.
-    queue: Mutex<VecDeque<i64>>,
+    queue: Mutex<VecDeque<(i64, ConvertOptions)>>,
     current: Mutex<Option<i64>>,
     wake: Condvar,
     cancel: AtomicBool,
@@ -239,16 +268,17 @@ impl ConvertService {
     }
 
     /// Queues the album. Refused when it is already queued or converting.
-    pub fn enqueue(&self, album_id: i64) -> Result<()> {
+    pub fn enqueue(&self, album_id: i64, opts: ConvertOptions) -> Result<()> {
         if let Some(why) = self.unavailable_reason() {
             bail!("{why}");
         }
+        opts.validate()?;
         {
             let mut q = self.shared.queue.lock().unwrap();
-            if q.contains(&album_id) || *self.shared.current.lock().unwrap() == Some(album_id) {
+            if q.iter().any(|&(id, _)| id == album_id) || *self.shared.current.lock().unwrap() == Some(album_id) {
                 bail!("That album is already being converted.");
             }
-            q.push_back(album_id);
+            q.push_back((album_id, opts));
         }
         (self.shared.notify)(ConvertEvent { album_id, state: ConvertState::Queued });
         self.shared.wake.notify_all();
@@ -260,7 +290,7 @@ impl ConvertService {
         let was_queued = {
             let mut q = self.shared.queue.lock().unwrap();
             let before = q.len();
-            q.retain(|&id| id != album_id);
+            q.retain(|&(id, _)| id != album_id);
             q.len() != before
         };
         if was_queued {
@@ -280,13 +310,13 @@ impl ConvertService {
 
 fn worker_loop(s: &Shared) {
     loop {
-        let album_id = {
+        let (album_id, opts) = {
             let mut q = s.queue.lock().unwrap();
             loop {
-                if let Some(id) = q.pop_front() {
+                if let Some((id, opts)) = q.pop_front() {
                     // Set while the queue lock is held, so `is_busy` never sees a gap.
                     *s.current.lock().unwrap() = Some(id);
-                    break id;
+                    break (id, opts);
                 }
                 q = s.wake.wait(q).unwrap();
             }
@@ -297,7 +327,7 @@ fn worker_loop(s: &Shared) {
             Some(exe) => {
                 let progress = |done, total| (s.notify)(ConvertEvent { album_id, state: ConvertState::Converting { done, total } });
                 let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    convert_album(&s.lib, exe, album_id, s.workers, &s.cancel, &progress)
+                    convert_album(&s.lib, exe, album_id, &opts, s.workers, &s.cancel, &progress)
                 }));
                 match run {
                     Ok(Ok(o)) if o.cancelled => ConvertState::Cancelled { converted: o.converted },

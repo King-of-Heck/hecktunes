@@ -68,7 +68,7 @@ fn converting_an_album_makes_tagged_256k_copies_and_switches_it_to_aac() {
     let a = add_flac_album(&mut l, dir.path(), "Hi Res", "Band", 2, 96_000, 24, true);
     let lib = Mutex::new(l);
     let steps = Mutex::new(Vec::new());
-    let out = convert_album(&lib, &exe, a, 2, &AtomicBool::new(false), &|d, t| steps.lock().unwrap().push((d, t))).unwrap();
+    let out = convert_album(&lib, &exe, a, &ConvertOptions::default(), 2, &AtomicBool::new(false), &|d, t| steps.lock().unwrap().push((d, t))).unwrap();
     assert_eq!(out, AlbumOutcome { converted: 2, failed: vec![], cancelled: false });
     assert_eq!(steps.into_inner().unwrap(), vec![(0, 2), (1, 2), (2, 2)]);
 
@@ -96,16 +96,47 @@ fn converting_an_album_makes_tagged_256k_copies_and_switches_it_to_aac() {
 }
 
 #[test]
+fn the_chosen_bitrate_is_used_and_the_album_can_stay_on_flac() {
+    let Some(exe) = test_ffmpeg() else { return };
+    let dir = tempfile::tempdir().unwrap();
+    let mut l = Library::open_in_memory(dir.path().join("lib")).unwrap();
+    let a = add_flac_album(&mut l, dir.path(), "Small", "Band", 1, 44_100, 16, false);
+    let lib = Mutex::new(l);
+    let opts = ConvertOptions { bitrate_kbps: 128, switch_to_aac: false };
+    let out = convert_album(&lib, &exe, a, &opts, 1, &AtomicBool::new(false), &no_progress).unwrap();
+    assert_eq!(out.converted, 1);
+    let l = lib.lock().unwrap();
+    let row = l.album(a).unwrap().unwrap();
+    assert_eq!((row.sync_as, row.aac_count), (SyncAs::Flac, 1), "converted, but still syncing FLAC");
+    let copy = l.album_tracks(a).unwrap()[0].aac.clone().unwrap();
+    let kbps = lofty::read_from_path(&copy.path).unwrap().properties().audio_bitrate().unwrap_or(0);
+    assert!((100..=160).contains(&kbps), "about 128 kbps, got {kbps}");
+}
+
+#[test]
+fn bitrates_outside_the_offered_list_are_refused() {
+    assert!(ConvertOptions::default().validate().is_ok());
+    for kbps in BITRATES {
+        assert!(ConvertOptions { bitrate_kbps: kbps, switch_to_aac: true }.validate().is_ok());
+    }
+    let e = ConvertOptions { bitrate_kbps: 300, switch_to_aac: true }.validate().unwrap_err();
+    assert!(e.to_string().contains("300 kbps"), "{e}");
+    let svc = ConvertService::start(Arc::new(Mutex::new(Library::open_in_memory(PathBuf::from("lib")).unwrap())), Some(PathBuf::from("ffmpeg")), 1, |_| {});
+    assert!(svc.enqueue(1, ConvertOptions { bitrate_kbps: 64, switch_to_aac: true }).is_err());
+    assert!(!svc.is_busy(), "a refused album isn't queued");
+}
+
+#[test]
 fn converting_again_only_does_what_is_missing_and_removing_copies_resets_the_album() {
     let Some(exe) = test_ffmpeg() else { return };
     let dir = tempfile::tempdir().unwrap();
     let mut l = Library::open_in_memory(dir.path().join("lib")).unwrap();
     let a = add_flac_album(&mut l, dir.path(), "Alb", "Band", 2, 44_100, 16, false);
     let lib = Mutex::new(l);
-    convert_album(&lib, &exe, a, 1, &AtomicBool::new(false), &no_progress).unwrap();
+    convert_album(&lib, &exe, a, &ConvertOptions::default(), 1, &AtomicBool::new(false), &no_progress).unwrap();
     let first = lib.lock().unwrap().album_tracks(a).unwrap()[0].aac.clone().unwrap();
     std::fs::remove_file(&first.path).unwrap();
-    let again = convert_album(&lib, &exe, a, 1, &AtomicBool::new(false), &no_progress).unwrap();
+    let again = convert_album(&lib, &exe, a, &ConvertOptions::default(), 1, &AtomicBool::new(false), &no_progress).unwrap();
     assert_eq!(again.converted, 1, "only the track whose copy went missing");
     assert!(first.path.exists());
 
@@ -126,7 +157,7 @@ fn a_failed_encode_leaves_no_file_and_keeps_the_album_on_flac() {
     // Leftover from a crash: it is replaced or removed, never kept.
     std::fs::write(flac.with_extension("converting.m4a"), b"junk").unwrap();
     let lib = Mutex::new(l);
-    let out = convert_album(&lib, Path::new("no-such-ffmpeg"), a, 2, &AtomicBool::new(false), &no_progress).unwrap();
+    let out = convert_album(&lib, Path::new("no-such-ffmpeg"), a, &ConvertOptions::default(), 2, &AtomicBool::new(false), &no_progress).unwrap();
     assert_eq!(out.converted, 0);
     assert_eq!(out.failed.len(), 1);
     assert_eq!(out.failed[0].title, "Song 1");
@@ -144,7 +175,7 @@ fn only_flac_tracks_are_converted() {
     let a = add_album(&mut l, dir.path(), "Wavs", "Band", 2, false);
     assert!(l.album_tracks(a).unwrap().iter().all(|t| !convertible(t)));
     let lib = Mutex::new(l);
-    let out = convert_album(&lib, Path::new("no-such-ffmpeg"), a, 2, &AtomicBool::new(false), &no_progress).unwrap();
+    let out = convert_album(&lib, Path::new("no-such-ffmpeg"), a, &ConvertOptions::default(), 2, &AtomicBool::new(false), &no_progress).unwrap();
     assert_eq!(out, AlbumOutcome::default());
     assert_eq!(lib.lock().unwrap().album(a).unwrap().unwrap().sync_as, SyncAs::Flac);
 }
@@ -155,7 +186,7 @@ fn a_cancelled_run_converts_nothing_more_and_does_not_switch_the_album() {
     let mut l = Library::open_in_memory(dir.path().join("lib")).unwrap();
     let a = add_flac_album(&mut l, dir.path(), "Alb", "Band", 2, 44_100, 16, false);
     let lib = Mutex::new(l);
-    let out = convert_album(&lib, Path::new("no-such-ffmpeg"), a, 1, &AtomicBool::new(true), &no_progress).unwrap();
+    let out = convert_album(&lib, Path::new("no-such-ffmpeg"), a, &ConvertOptions::default(), 1, &AtomicBool::new(true), &no_progress).unwrap();
     assert_eq!(out, AlbumOutcome { converted: 0, failed: vec![], cancelled: true });
 }
 
@@ -184,10 +215,10 @@ fn the_service_converts_queued_albums_in_turn_and_reports_each() {
         let _ = tx.lock().unwrap().send(e);
     });
     assert_eq!(svc.unavailable_reason(), None);
-    svc.enqueue(a).unwrap();
-    svc.enqueue(b).unwrap();
+    svc.enqueue(a, ConvertOptions::default()).unwrap();
+    svc.enqueue(b, ConvertOptions::default()).unwrap();
     assert!(svc.is_busy());
-    assert!(svc.enqueue(b).is_err(), "an album already queued is refused");
+    assert!(svc.enqueue(b, ConvertOptions::default()).is_err(), "an album already queued is refused");
     let events = wait_for(&rx, |s| matches!(s, ConvertState::Finished { .. }));
     let events = [events, wait_for(&rx, |s| matches!(s, ConvertState::Finished { .. }))].concat();
     let finished: Vec<i64> = events.iter().filter(|e| matches!(e.state, ConvertState::Finished { converted: 1, .. })).map(|e| e.album_id).collect();
@@ -202,7 +233,7 @@ fn without_ffmpeg_the_service_refuses_and_says_why() {
     let lib = Arc::new(Mutex::new(Library::open_in_memory(PathBuf::from("/lib")).unwrap()));
     let svc = ConvertService::start(lib, None, 1, |_| {});
     assert!(svc.unavailable_reason().unwrap().contains("ffmpeg"));
-    assert!(svc.enqueue(1).unwrap_err().to_string().contains("ffmpeg"));
+    assert!(svc.enqueue(1, ConvertOptions::default()).unwrap_err().to_string().contains("ffmpeg"));
     assert!(!svc.is_busy());
 }
 
@@ -219,7 +250,7 @@ fn non_ascii_album_and_artist_names_convert() {
     let mut l = Library::open_in_memory(dir.path().join("lib")).unwrap();
     let a = add_flac_album(&mut l, dir.path(), "Jóga – 日本", "Björk", 1, 44_100, 16, false);
     let lib = Mutex::new(l);
-    let out = convert_album(&lib, &exe, a, 1, &AtomicBool::new(false), &no_progress).unwrap();
+    let out = convert_album(&lib, &exe, a, &ConvertOptions::default(), 1, &AtomicBool::new(false), &no_progress).unwrap();
     assert_eq!(out, AlbumOutcome { converted: 1, failed: vec![], cancelled: false });
     let copy = lib.lock().unwrap().album_tracks(a).unwrap()[0].aac.clone().unwrap();
     assert!(copy.path.to_string_lossy().contains("日本"));

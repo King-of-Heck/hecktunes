@@ -6,7 +6,7 @@ A small desktop app that acts as iTunes for a Snowsky Echo Mini running [EchoPod
 - Browse by album, artist or song; make playlists; preview tracks, with a volume slider and mute.
 - Import vinyl recordings: record a whole side as one WAV or MP3 file, and HeckTunes finds the tracks, identifies the record, and lets you check every cut before importing (**Tools → Choose recording…**).
 - Tick albums, artists and playlists for the player and sync them to its microSD card. HeckTunes only ever changes files it put there, and runs echo-sync afterwards so the player doesn't have to rescan.
-- Fit more on the card: **Convert to AAC** on a FLAC album makes 256 kbps AAC (.m4a) copies beside the FLAC files, and the album's **Echo Mini gets FLAC | AAC** switch chooses which ones sync. The FLAC files stay, and tag or cover edits reach both.
+- Fit more on the card: **Convert to AAC** on a FLAC album makes AAC (.m4a) copies beside the FLAC files at the bitrate you pick (128 to 320 kbps), and the album's **Echo Mini gets FLAC | AAC** switch chooses which ones sync. The FLAC files stay, and tag or cover edits reach both.
 
 ## Install
 

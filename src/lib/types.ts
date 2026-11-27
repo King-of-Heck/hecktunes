@@ -17,6 +17,13 @@ export interface AlbumRow {
 
 export type SyncAs = 'flac' | 'aac';
 
+/** Choices made when starting Convert to AAC. */
+export interface ConvertOptions {
+  bitrate_kbps: number;
+  /** Have the Echo Mini get the AAC copies once the conversion finishes. */
+  switch_to_aac: boolean;
+}
+
 /** A track's AAC copy (Convert to AAC). */
 export interface AacCopy {
   path: string;

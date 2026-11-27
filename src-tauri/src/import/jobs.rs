@@ -715,7 +715,7 @@ mod tests {
         let lib = Arc::new(Mutex::new(Library::open_in_memory(dir.path().join("lib")).unwrap()));
         let a = crate::convert::tests::add_flac_album(&mut lib.lock().unwrap(), dir.path(), "Album", "Band", 2, 44_100, 16, false);
         let cancel = std::sync::atomic::AtomicBool::new(false);
-        crate::convert::convert_album(&lib, &exe, a, 2, &cancel, &|_, _| {}).unwrap();
+        crate::convert::convert_album(&lib, &exe, a, &crate::convert::ConvertOptions::default(), 2, &cancel, &|_, _| {}).unwrap();
         let (tx, rx) = channel();
         let release = candidate("m9", "Album", "Band", &[("Song 1", 1500), ("Song 2", 1500)]);
         let q = ImportQueue::start(lib.clone(), Arc::new(FakeSource { releases: vec![release], search_ids: vec!["m9".into()] }), move |u| {

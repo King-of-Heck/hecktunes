@@ -6,6 +6,7 @@ import type {
   AlbumEdit,
   AlbumRow,
   ConvertEvent,
+  ConvertOptions,
   JobChoice,
   JobUpdate,
   PlanSummary,
@@ -37,7 +38,7 @@ export const setAlbumCover = (albumId: number, path: string) => invoke<void>('se
 export const listSongs = () => invoke<SongRow[]>('list_songs');
 export const deleteAlbum = (albumId: number) => invoke<void>('delete_album', { albumId });
 export const convertUnavailable = () => invoke<string | null>('convert_unavailable');
-export const convertAlbum = (albumId: number) => invoke<void>('convert_album', { albumId });
+export const convertAlbum = (albumId: number, options: ConvertOptions) => invoke<void>('convert_album', { albumId, options });
 export const cancelConvert = (albumId: number) => invoke<void>('cancel_convert', { albumId });
 export const removeAac = (albumId: number) => invoke<void>('remove_aac', { albumId });
 export const setAlbumSyncAs = (albumId: number, syncAs: SyncAs) => invoke<void>('set_album_sync_as', { albumId, syncAs });

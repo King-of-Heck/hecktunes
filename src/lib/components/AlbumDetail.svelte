@@ -2,8 +2,9 @@
   import { inControl } from '../rows';
   import { onMount } from 'svelte';
   import { albumTracks, cancelConvert, convertAlbum, convertUnavailable, coverUrl, deleteAlbum, formatDuration, removeAac, setAlbumSyncAs } from '../api';
-  import type { AlbumRow, ConvertEvent, JobUpdate, PlaylistRow, QueueItem, SyncAs, TrackRow } from '../types';
+  import type { AlbumRow, ConvertEvent, ConvertOptions, JobUpdate, PlaylistRow, QueueItem, SyncAs, TrackRow } from '../types';
   import AddToPlaylist from './AddToPlaylist.svelte';
+  import ConvertMenu from './ConvertMenu.svelte';
   let {
     album,
     bust,
@@ -82,7 +83,7 @@
       aacWorking = false;
     }
   }
-  const startConvert = () => aac(() => convertAlbum(album.id), false);
+  const startConvert = (options: ConvertOptions) => aac(() => convertAlbum(album.id, options), false);
   const stopConvert = () => aac(() => cancelConvert(album.id), false);
   function chooseSync(to: SyncAs) {
     if (to !== album.sync_as) aac(() => setAlbumSyncAs(album.id, to), true);
@@ -148,10 +149,14 @@
         <button onclick={() => onEdit(tracks)} disabled={busy}>Edit tags</button>
         <button onclick={fix} disabled={retrying || busy}>{retrying ? 'Looking up…' : 'Fix metadata'}</button>
         <AddToPlaylist trackIds={tracks.map((t) => t.id)} {playlists} {onPlaylistsChanged} label="Add to playlist" />
+        {#if !active && missing > 0}
+          <ConvertMenu label={convertLabel} disabled={aacWorking || syncing || unavailable !== null} onConvert={startConvert} />
+        {/if}
         {#if !confirming}<button onclick={() => (confirming = true)} disabled={busy}>Remove from library</button>{/if}
       </div>
       {#if busy}<p class="meta">{busyNote}</p>{/if}
       {#if flacTracks.length > 0}
+        {#if active || album.aac_count > 0}
         <div class="aac">
           {#if active && convert}
             <span class="progress">
@@ -166,18 +171,14 @@
                 <button class:on={album.sync_as === 'aac'} aria-pressed={album.sync_as === 'aac'} onclick={() => chooseSync('aac')} disabled={aacWorking}>AAC</button>
               </span>
             {/if}
-            {#if missing > 0}
-              <button onclick={startConvert} disabled={aacWorking || syncing || unavailable !== null}>{convertLabel}</button>
-            {/if}
             {#if album.aac_count > 0 && !confirmingRemoveAac}
               <button onclick={() => (confirmingRemoveAac = true)} disabled={aacWorking || busy}>Remove AAC copies</button>
             {/if}
           {/if}
         </div>
+        {/if}
         {#if album.aac_count > 0 && !active}
-          <p class="meta">{album.aac_count} of {flacTracks.length} tracks have a 256 kbps AAC copy beside the FLAC.</p>
-        {:else if !active && missing > 0 && unavailable === null}
-          <p class="meta">Makes 256 kbps AAC (.m4a) copies beside the FLAC files, for a smaller Echo Mini sync. The FLAC files stay.</p>
+          <p class="meta">{album.aac_count} of {flacTracks.length} tracks have an AAC copy beside the FLAC.</p>
         {/if}
         {#if confirmingRemoveAac}
           <p class="confirm">

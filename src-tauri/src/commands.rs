@@ -272,12 +272,12 @@ pub fn convert_unavailable(state: State<AppState>) -> Option<String> {
 
 /// Queues the album for Convert to AAC; progress arrives as "convert" events.
 #[tauri::command(async)]
-pub fn convert_album(state: State<AppState>, album_id: i64) -> CmdResult<()> {
+pub fn convert_album(state: State<AppState>, album_id: i64, options: crate::convert::ConvertOptions) -> CmdResult<()> {
     library_ready(&state)?;
     if state.sync.is_running() {
         return Err("Wait for the Echo Mini sync to finish first.".to_string());
     }
-    state.convert.enqueue(album_id).map_err(err)
+    state.convert.enqueue(album_id, options).map_err(err)
 }
 
 #[tauri::command(async)]

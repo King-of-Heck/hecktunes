@@ -1,4 +1,4 @@
-//! Running the bundled ffmpeg to turn one FLAC file into a 256 kbps AAC (.m4a) file.
+//! Running the bundled ffmpeg to turn one FLAC file into an AAC (.m4a) file.
 
 use anyhow::{anyhow, bail, Result};
 use std::ffi::OsString;
@@ -13,8 +13,6 @@ pub const FFMPEG_VERSION: &str = "8.1.3";
 /// Where that release's source code is published.
 pub const FFMPEG_SOURCE: &str = "https://ffmpeg.org/releases/ffmpeg-8.1.3.tar.xz";
 
-/// The bitrate every conversion uses.
-pub const BITRATE: &str = "256k";
 /// One track taking longer than this is stopped (a stuck ffmpeg, not a long track: encoding runs
 /// at many times real time).
 const TRACK_TIMEOUT: Duration = Duration::from_secs(30 * 60);
@@ -40,13 +38,14 @@ pub fn target_rate(source_rate: u32) -> Option<u32> {
 }
 
 /// ffmpeg's arguments: first audio stream only, no tags or pictures copied (HeckTunes writes its
-/// own afterwards), AAC-LC at `BITRATE`, in an .m4a (ipod) container.
-pub fn args(source: &Path, dest: &Path, rate: Option<u32>) -> Vec<OsString> {
+/// own afterwards), AAC-LC at `kbps`, in an .m4a (ipod) container.
+pub fn args(source: &Path, dest: &Path, kbps: u32, rate: Option<u32>) -> Vec<OsString> {
     let mut a: Vec<OsString> = ["-nostdin", "-hide_banner", "-loglevel", "error", "-y", "-i"].iter().map(OsString::from).collect();
     a.push(source.as_os_str().to_owned());
-    for s in ["-map", "0:a:0", "-map_metadata", "-1", "-c:a", "aac", "-b:a", BITRATE] {
+    for s in ["-map", "0:a:0", "-map_metadata", "-1", "-c:a", "aac", "-b:a"] {
         a.push(s.into());
     }
+    a.push(format!("{kbps}k").into());
     if let Some(r) = rate {
         a.push("-ar".into());
         a.push(r.to_string().into());
@@ -123,8 +122,8 @@ mod tests {
     }
 
     #[test]
-    fn arguments_encode_the_first_audio_stream_at_256k_without_copying_tags() {
-        let a: Vec<String> = args(Path::new("in.flac"), Path::new("out.m4a"), Some(48_000))
+    fn arguments_encode_the_first_audio_stream_at_the_chosen_bitrate_without_copying_tags() {
+        let a: Vec<String> = args(Path::new("in.flac"), Path::new("out.m4a"), 256, Some(48_000))
             .iter()
             .map(|s| s.to_string_lossy().into_owned())
             .collect();
@@ -132,7 +131,8 @@ mod tests {
             a.join(" "),
             "-nostdin -hide_banner -loglevel error -y -i in.flac -map 0:a:0 -map_metadata -1 -c:a aac -b:a 256k -ar 48000 -f ipod out.m4a"
         );
-        let plain = args(Path::new("in.flac"), Path::new("out.m4a"), None);
+        let plain = args(Path::new("in.flac"), Path::new("out.m4a"), 192, None);
+        assert!(plain.iter().any(|s| s == "192k"));
         assert!(!plain.iter().any(|s| s == "-ar"));
     }
 

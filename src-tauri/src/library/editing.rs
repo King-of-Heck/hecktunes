@@ -315,7 +315,7 @@ mod tests {
         let a = crate::convert::tests::add_flac_album(&mut l, dir.path(), "Alb", "Band", 2, 44_100, 16, false);
         let lib = std::sync::Mutex::new(l);
         let cancel = std::sync::atomic::AtomicBool::new(false);
-        crate::convert::convert_album(&lib, &exe, a, 2, &cancel, &|_, _| {}).unwrap();
+        crate::convert::convert_album(&lib, &exe, a, &crate::convert::ConvertOptions::default(), 2, &cancel, &|_, _| {}).unwrap();
         let mut l = lib.into_inner().unwrap();
 
         apply_album_edit(&mut l, a, &AlbumEdit { title: "Renamed".into(), album_artist: "Band".into(), year: None, genre: None }).unwrap();
