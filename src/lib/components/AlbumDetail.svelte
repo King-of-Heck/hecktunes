@@ -164,12 +164,6 @@
             <button onclick={stopConvert} disabled={aacWorking}>Cancel</button>
           </div>
         {/if}
-        {#if album.aac_count > 0 && !active}
-          <p class="meta">
-            {album.aac_count} of {flacTracks.length} tracks have an AAC copy beside the FLAC. The HeckPod gets the
-            {album.sync_as === 'aac' ? 'AAC' : 'FLAC'} files; change that on the HeckPod page.
-          </p>
-        {/if}
         {#if confirmingRemoveAac}
           <p class="confirm">
             Delete this album's AAC copies? The FLAC files stay, and the HeckPod gets them again at the next sync.
