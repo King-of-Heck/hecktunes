@@ -22,7 +22,7 @@
     <section>
       <h3>echo-sync {info.echo_sync_version}</h3>
       <p>
-        HeckTunes runs echo-sync, a separate program from the EchoPod project, after each sync so the Echo Mini doesn't
+        HeckTunes runs echo-sync, a separate program from the EchoPod project, after each sync so the HeckPod doesn't
         have to rescan the card. echo-sync is free software under the GNU General Public License v3.
         <button class="link" onclick={() => open(info!.echo_sync_source)}>Its source code</button>
       </p>
@@ -31,6 +31,22 @@
         <details><summary>echo-sync licence (GPLv3)</summary><pre>{info.echo_sync_license}</pre></details>
       {:else}
         <p class="warn">The echo-sync licence file is missing from this build.</p>
+      {/if}
+    </section>
+
+    <section>
+      <h3>FFmpeg {info.ffmpeg_version}</h3>
+      <p>
+        Convert to AAC uses FFmpeg, a separate program built for HeckTunes with only what conversion needs (the FLAC
+        decoder and FFmpeg's own AAC encoder). This build is free software under the GNU Lesser General Public License
+        v2.1 or later.
+        <button class="link" onclick={() => open(info!.ffmpeg_source)}>Its source code</button>
+      </p>
+      <p class="meta">Each HeckTunes release page also carries a copy of FFmpeg's source code.</p>
+      {#if info.ffmpeg_license}
+        <details><summary>FFmpeg licence (LGPL v2.1)</summary><pre>{info.ffmpeg_license}</pre></details>
+      {:else}
+        <p class="warn">The FFmpeg licence file is missing from this build.</p>
       {/if}
     </section>
 

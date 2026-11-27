@@ -1,8 +1,10 @@
 <script lang="ts">
   import { inControl } from '../rows';
-  import { albumTracks, coverUrl, deleteAlbum, formatDuration } from '../api';
-  import type { AlbumRow, JobUpdate, PlaylistRow, QueueItem, TrackRow } from '../types';
+  import { onMount } from 'svelte';
+  import { albumTracks, cancelConvert, convertAlbum, convertUnavailable, coverUrl, deleteAlbum, formatDuration, removeAac } from '../api';
+  import type { AlbumRow, ConvertEvent, ConvertOptions, JobUpdate, PlaylistRow, QueueItem, TrackRow } from '../types';
   import AddToPlaylist from './AddToPlaylist.svelte';
+  import ConvertMenu from './ConvertMenu.svelte';
   let {
     album,
     bust,
@@ -10,6 +12,8 @@
     playlists,
     retryJobId,
     syncing,
+    converting,
+    convert,
     nowPlayingId,
     onPlay,
     onRetry,
@@ -17,6 +21,7 @@
     onEdit,
     onPlaylistsChanged,
     onRemoved,
+    onChanged,
   }: {
     album: AlbumRow;
     bust: number;
@@ -25,6 +30,10 @@
     retryJobId: number | null;
     /** A sync is copying library files: hold back changes to them until it ends. */
     syncing: boolean;
+    /** Some album is being converted to AAC: library changes wait for it too. */
+    converting: boolean;
+    /** The latest Convert to AAC event for this album. */
+    convert: ConvertEvent | null;
     nowPlayingId: number | null;
     onPlay: (items: QueueItem[], index: number) => void;
     onRetry: () => Promise<void>;
@@ -32,9 +41,55 @@
     onEdit: (tracks: TrackRow[]) => void;
     onPlaylistsChanged: () => Promise<void>;
     onRemoved: () => Promise<void>;
+    /** The album row changed (AAC copies removed): reload it. */
+    onChanged: () => Promise<void>;
   } = $props();
 
   let tracks = $state<TrackRow[]>([]);
+
+  const busy = $derived(syncing || converting);
+  const busyNote = $derived(
+    syncing ? 'Editing and removing are paused while the HeckPod sync runs.' : 'Editing and removing are paused while albums are converted to AAC.',
+  );
+
+  // Convert to AAC
+  let unavailable = $state<string | null>(null);
+  let aacError = $state<string | null>(null);
+  let aacWorking = $state(false);
+  let confirmingRemoveAac = $state(false);
+  onMount(() => {
+    convertUnavailable()
+      .then((r) => (unavailable = r))
+      .catch((e) => console.error('convert_unavailable failed', e));
+  });
+  const active = $derived(convert !== null && (convert.state === 'queued' || convert.state === 'converting'));
+  const flacTracks = $derived(tracks.filter((t) => t.format.toLowerCase() === 'flac'));
+  const missing = $derived(flacTracks.filter((t) => t.aac === null).length);
+  const convertLabel = $derived(
+    album.aac_count === 0 ? 'Convert to AAC' : missing === 1 ? 'Convert the last track to AAC' : `Convert the other ${missing} tracks to AAC`,
+  );
+  const failedHeading = (n: number) => (n === 1 ? "1 track couldn't be converted:" : `${n} tracks couldn't be converted:`);
+  const cancelledNote = (n: number) => (n === 0 ? 'Conversion cancelled.' : `Conversion cancelled after ${n} ${n === 1 ? 'track' : 'tracks'}.`);
+
+  async function aac(what: () => Promise<unknown>, reload: boolean) {
+    aacError = null;
+    aacWorking = true;
+    try {
+      await what();
+      if (reload) await onChanged();
+    } catch (e) {
+      aacError = `${e}`;
+    } finally {
+      aacWorking = false;
+    }
+  }
+  const startConvert = (options: ConvertOptions) => aac(() => convertAlbum(album.id, options), false);
+  const stopConvert = () => aac(() => cancelConvert(album.id), false);
+  async function dropCopies() {
+    await aac(() => removeAac(album.id), true);
+    confirmingRemoveAac = false;
+  }
+
   const items = $derived(tracks.map((t) => ({ id: t.id, title: t.title, artist: t.artist, album_title: album.title })));
   let retryError = $state<string | null>(null);
   let confirming = $state(false);
@@ -88,16 +143,51 @@
       <p class="artist">{album.album_artist}</p>
       <p class="meta">{[album.year, album.genre, `${album.track_count} tracks`].filter(Boolean).join(' · ')}</p>
       <div class="actions">
-        <button onclick={() => onEdit(tracks)} disabled={syncing}>Edit tags</button>
-        <button onclick={fix} disabled={retrying || syncing}>{retrying ? 'Looking up…' : 'Fix metadata'}</button>
+        <button onclick={() => onEdit(tracks)} disabled={busy}>Edit tags</button>
+        <button onclick={fix} disabled={retrying || busy}>{retrying ? 'Looking up…' : 'Fix metadata'}</button>
         <AddToPlaylist trackIds={tracks.map((t) => t.id)} {playlists} {onPlaylistsChanged} label="Add to playlist" />
-        {#if !confirming}<button onclick={() => (confirming = true)} disabled={syncing}>Remove from library</button>{/if}
+        {#if !active && missing > 0}
+          <ConvertMenu label={convertLabel} disabled={aacWorking || syncing || unavailable !== null} onConvert={startConvert} />
+        {/if}
+        {#if !active && album.aac_count > 0 && !confirmingRemoveAac}
+          <button onclick={() => (confirmingRemoveAac = true)} disabled={aacWorking || busy}>Remove AAC copies</button>
+        {/if}
+        {#if !confirming}<button onclick={() => (confirming = true)} disabled={busy}>Remove from library</button>{/if}
       </div>
-      {#if syncing}<p class="meta">Editing and removing are paused while the HeckPod sync runs.</p>{/if}
+      {#if busy}<p class="meta">{busyNote}</p>{/if}
+      {#if flacTracks.length > 0}
+        {#if active && convert}
+          <div class="aac">
+            <span class="progress">
+              {#if convert.state === 'converting'}Converting to AAC… {convert.done} of {convert.total}{:else}Waiting to convert to AAC…{/if}
+            </span>
+            <button onclick={stopConvert} disabled={aacWorking}>Cancel</button>
+          </div>
+        {/if}
+        {#if confirmingRemoveAac}
+          <p class="confirm">
+            Delete this album's AAC copies? The FLAC files stay, and the HeckPod gets them again at the next sync.
+            <button class="danger" onclick={dropCopies} disabled={aacWorking || busy}>Delete copies</button>
+            <button onclick={() => (confirmingRemoveAac = false)} disabled={aacWorking}>Cancel</button>
+          </p>
+        {/if}
+        {#if unavailable !== null && missing > 0}<p class="meta">{unavailable}</p>{/if}
+        {#if convert?.state === 'finished' && convert.failed.length > 0}
+          <div class="err">
+            {failedHeading(convert.failed.length)}
+            <ul>{#each convert.failed as f}<li>{f.title}: {f.error}</li>{/each}</ul>
+          </div>
+        {:else if convert?.state === 'cancelled'}
+          <p class="meta">{cancelledNote(convert.converted)}</p>
+        {:else if convert?.state === 'failed'}
+          <p class="err">Couldn't convert: {convert.error}</p>
+        {/if}
+        {#if aacError}<p class="err">{aacError}</p>{/if}
+      {/if}
       {#if confirming}
         <p class="confirm">
           Remove this album and delete its files from the library folder? Your original files aren't touched.
-          <button class="danger" onclick={remove} disabled={removing || syncing}>Remove</button>
+          <button class="danger" onclick={remove} disabled={removing || busy}>Remove</button>
           <button onclick={() => (confirming = false)} disabled={removing}>Cancel</button>
         </p>
       {/if}
@@ -113,7 +203,7 @@
           <td class="play"><button title="Play" onclick={() => onPlay(items, i)}>▶</button></td>
           <td class="num">{tracks.some((x) => x.disc > 1) ? `${t.disc}-` : ''}{t.number}</td>
           <td>{t.title}{#if t.artist !== album.album_artist}<span class="feat"> — {t.artist}</span>{/if}</td>
-          <td class="fmt">{t.format.toUpperCase()}</td>
+          <td class="fmt">{t.format.toUpperCase()}{t.aac ? ' + AAC' : ''}</td>
           <td class="dur">{formatDuration(t.duration_ms)}</td>
           <td class="add"><AddToPlaylist trackIds={[t.id]} {playlists} {onPlaylistsChanged} /></td>
         </tr>
@@ -136,6 +226,9 @@
   .confirm { margin: 10px 0 0; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
   .danger { background: var(--danger); color: #fff; border-color: var(--danger); }
   .add { width: 1%; white-space: nowrap; }
+  .aac { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-top: 10px; }
+  .progress { color: var(--muted); }
+  .err ul { margin: 4px 0 0; padding-left: 18px; }
   table { width: 100%; border-collapse: collapse; }
   td { padding: 7px 8px; border-bottom: 1px solid var(--border); }
   .num, .dur, .fmt { color: var(--muted); width: 1%; white-space: nowrap; }

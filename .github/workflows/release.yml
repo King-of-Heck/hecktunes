@@ -80,6 +80,27 @@ jobs:
       - run: npm ci
       - name: Fetch echo-sync for the target (binary + licence, checksum-verified)
         run: node scripts/fetch-echo-sync.mjs --target ${{ matrix.target }}
+      # The AAC-only ffmpeg sidecar (and its licence), rebuilt only when the build script changes.
+      - name: Cache the ffmpeg sidecar
+        id: ffmpeg-cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            src-tauri/binaries/ffmpeg-${{ matrix.target }}*
+            src-tauri/licenses/ffmpeg-LICENSE.txt
+          key: ffmpeg-${{ matrix.target }}-${{ hashFiles('scripts/build-ffmpeg.sh') }}
+      - uses: msys2/setup-msys2@v2
+        if: runner.os == 'Windows' && steps.ffmpeg-cache.outputs.cache-hit != 'true'
+        with:
+          msystem: CLANG64
+          install: make diffutils curl xz mingw-w64-clang-x86_64-clang
+      - name: Build the ffmpeg sidecar (Windows)
+        if: runner.os == 'Windows' && steps.ffmpeg-cache.outputs.cache-hit != 'true'
+        shell: msys2 {0}
+        run: bash scripts/build-ffmpeg.sh ${{ matrix.target }}
+      - name: Build the ffmpeg sidecar (macOS)
+        if: runner.os == 'macOS' && steps.ffmpeg-cache.outputs.cache-hit != 'true'
+        run: bash scripts/build-ffmpeg.sh ${{ matrix.target }}
       - name: Third-party notices for the target
         run: node scripts/third-party-notices.mjs --target ${{ matrix.target }}
       - uses: tauri-apps/tauri-action@v1
@@ -90,7 +111,8 @@ jobs:
           tagName: ${{ github.ref_name }}
           args: --target ${{ matrix.target }} --bundles ${{ matrix.bundles }}
 
-  # echo-sync is GPLv3 and ships inside the installers, so its source goes on the same release page.
+  # echo-sync (GPLv3) and the ffmpeg sidecar (LGPL) ship inside the installers, so their source
+  # goes on the same release page.
   echo-sync-source:
     needs: [create-release, build]
     # Runs even if one matrix leg failed. Skipped when no release was made (e.g. the version
@@ -100,13 +122,23 @@ jobs:
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       RELEASE_ID: ${{ needs.create-release.outputs.id }}
-      FILE: echopod-v0.11.1-source.tar.gz
     steps:
-      - name: Attach echo-sync's source to the draft release
+      - uses: actions/checkout@v4
+      - name: Attach echo-sync's and ffmpeg's source to the draft release
         run: |
-          curl -fsSL --retry 3 -o "$FILE" https://github.com/BasilSkyWalk/echopod/archive/refs/tags/v0.11.1.tar.gz
           # Replace an earlier upload (a re-run), then upload into the release by id.
-          old=$(gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID/assets" --paginate --jq '.[] | select(.name == env.FILE) | .id')
-          if [ -n "$old" ]; then gh api -X DELETE "repos/$GITHUB_REPOSITORY/releases/assets/$old"; fi
-          gh api -X POST "https://uploads.github.com/repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID/assets?name=$FILE" \
-            -H "Content-Type: application/gzip" --input "$FILE" --jq '"Uploaded \(.name) (\(.size) bytes)"'
+          upload() { # <file> <content type>
+            old=$(FILE="$1" gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID/assets" --paginate --jq '.[] | select(.name == env.FILE) | .id')
+            if [ -n "$old" ]; then gh api -X DELETE "repos/$GITHUB_REPOSITORY/releases/assets/$old"; fi
+            gh api -X POST "https://uploads.github.com/repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID/assets?name=$1" \
+              -H "Content-Type: $2" --input "$1" --jq '"Uploaded \(.name) (\(.size) bytes)"'
+          }
+          curl -fsSL --retry 3 -o echopod-v0.11.1-source.tar.gz https://github.com/BasilSkyWalk/echopod/archive/refs/tags/v0.11.1.tar.gz
+          upload echopod-v0.11.1-source.tar.gz application/gzip
+          # The exact tarball the ffmpeg sidecar is built from, checked against its pinned SHA-256.
+          version=$(sed -n 's/^VERSION=//p' scripts/build-ffmpeg.sh)
+          sha=$(sed -n 's/^SHA256=//p' scripts/build-ffmpeg.sh)
+          file="ffmpeg-$version.tar.xz"
+          curl -fsSL --retry 3 -o "$file" "https://ffmpeg.org/releases/$file"
+          echo "$sha  $file" | sha256sum -c -
+          upload "$file" application/x-xz

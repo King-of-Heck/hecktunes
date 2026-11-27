@@ -21,6 +21,24 @@ jobs:
       - run: npm ci
       - name: Fetch echo-sync (binary + licence, checksum-verified)
         run: npm run sidecar
+      # The AAC-only ffmpeg sidecar (and its licence), rebuilt only when the build script changes.
+      - name: Cache the ffmpeg sidecar
+        id: ffmpeg-cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            src-tauri/binaries/ffmpeg-x86_64-pc-windows-msvc.exe
+            src-tauri/licenses/ffmpeg-LICENSE.txt
+          key: ffmpeg-x86_64-pc-windows-msvc-${{ hashFiles('scripts/build-ffmpeg.sh') }}
+      - uses: msys2/setup-msys2@v2
+        if: steps.ffmpeg-cache.outputs.cache-hit != 'true'
+        with:
+          msystem: CLANG64
+          install: make diffutils curl xz mingw-w64-clang-x86_64-clang
+      - name: Build the ffmpeg sidecar
+        if: steps.ffmpeg-cache.outputs.cache-hit != 'true'
+        shell: msys2 {0}
+        run: bash scripts/build-ffmpeg.sh x86_64-pc-windows-msvc
       - run: npm run check
       - run: npm run build
       - name: Rust tests

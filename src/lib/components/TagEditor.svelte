@@ -85,7 +85,7 @@
       </tbody>
     </table>
     {#if error}<p class="error">{error}</p>{/if}
-    {#if syncing}<p class="note">Saving is paused while the HeckPod sync runs.</p>{/if}
+    {#if syncing}<p class="note">Saving is paused while the HeckPod sync or an AAC conversion runs.</p>{/if}
     <div class="footer">
       <button onclick={() => onClose(coverChanged)} disabled={saving}>Cancel</button>
       <button class="primary" onclick={save} disabled={saving || syncing}>{saving ? 'Saving…' : 'Save'}</button>

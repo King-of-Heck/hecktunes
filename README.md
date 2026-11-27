@@ -6,6 +6,7 @@ A small desktop app that acts as iTunes for a Snowsky Echo Mini running [EchoPod
 - Browse by album, artist or song; make playlists; preview tracks, with a volume slider and mute.
 - Import vinyl recordings: record a whole side as one WAV or MP3 file, and HeckTunes finds the tracks, identifies the record, and lets you check every cut before importing (**Tools → Choose recording…**).
 - Tick albums, artists and playlists for the player and sync them to its microSD card. HeckTunes only ever changes files it put there, and runs echo-sync afterwards so the player doesn't have to rescan.
+- Fit more on the card: **Convert to AAC** on a FLAC album makes AAC (.m4a) copies beside the FLAC files at the bitrate you pick (128 to 320 kbps), and a FLAC | AAC menu beside each converted album on the HeckPod page chooses which files sync. The FLAC files stay, and tag or cover edits reach both.
 
 ## Install
 
@@ -29,8 +30,11 @@ Requirements: Node 24, Rust (stable), and the [Tauri prerequisites](https://taur
 ```bash
 npm install          # also fetches echo-sync (checksum-verified)
 npm run sidecar      # re-run if the echo-sync download failed
+bash scripts/build-ffmpeg.sh   # builds the AAC-only ffmpeg sidecar (see below)
 npx tauri dev
 ```
+
+The ffmpeg sidecar is a small LGPL build of a pinned FFmpeg release with only the FLAC decoder, the AAC encoder and the .m4a muxer. On Windows run the script in an MSYS2 **CLANG64** shell (packages `make diffutils curl xz mingw-w64-clang-x86_64-clang`); on macOS the Xcode command-line tools are enough. The conversion tests use it when it's there and skip it otherwise.
 
 Checks: `npm run check`, `npm run build`, `cd src-tauri && cargo test`. Regenerate `src-tauri/licenses/THIRD_PARTY_NOTICES.md` with `npm run notices` after changing dependencies.
 
@@ -38,4 +42,4 @@ Releases: bump the version in `package.json`, `src-tauri/tauri.conf.json` and `s
 
 ## Licences
 
-echo-sync (bundled as a separate program) is GPLv3; its licence and a link to its source are in **About**, along with the licences of the open-source components HeckTunes is built from. HeckTunes itself is free software under the GNU General Public License, version 3 or (at your option) any later version (GPL-3.0-or-later); see `LICENSE`.
+echo-sync (bundled as a separate program) is GPLv3, and the bundled FFmpeg build is LGPL-2.1-or-later. Their licences and links to their source are in **About**, along with the licences of the open-source components HeckTunes is built from, and each release page carries both source archives. HeckTunes itself is free software under the GNU General Public License, version 3 or (at your option) any later version (GPL-3.0-or-later); see `LICENSE`.

@@ -150,6 +150,7 @@ const out = [
   `HeckTunes is built from the open-source components below (Rust crates for ${target}, and the JavaScript bundled into its window). Each is used under the licence shown; the licence texts follow.`,
   '',
   'echo-sync, bundled as a separate program, is covered by its own licence (see echo-sync-LICENSE.txt).',
+  'FFmpeg, bundled as a separate program for Convert to AAC, is covered by its own licence, LGPL-2.1-or-later (see ffmpeg-LICENSE.txt).',
   '',
   '## Rust crates',
   '',

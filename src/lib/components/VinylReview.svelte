@@ -152,7 +152,7 @@
     {#if listenError}<p class="warn">{listenError}</p>{/if}
     {#if resolveError}<p class="warn">{resolveError}</p>{/if}
     {#if mismatch}<p class="warn">{mismatch}</p>{/if}
-    {#if syncing}<p class="muted">Waiting for the HeckPod sync to finish before changing your library.</p>{/if}
+    {#if syncing}<p class="muted">Waiting for the HeckPod sync or AAC conversion to finish before changing your library.</p>{/if}
     <div class="footer">
       <button onclick={() => choose({ kind: 'skip' })} disabled={busy}>Don't import</button>
       <button onclick={() => choose({ kind: 'vinyl_confirm', tracks, matched: false })} disabled={busy || syncing}>Import without a match</button>

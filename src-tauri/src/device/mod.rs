@@ -1,4 +1,4 @@
-//! Putting a chosen part of the library on the Echo Mini's microSD card.
+//! Putting a chosen part of the library on the HeckPod's microSD card.
 pub mod cardpath;
 pub mod detect;
 pub mod echosync;
@@ -65,7 +65,7 @@ fn check_card_is_not_the_library(card: &Path, library_root: &Path) -> Result<()>
     for top in [cardpath::MUSIC_DIR, cardpath::PLAYLISTS_DIR] {
         if overlaps(&resolve(&card.join(top)), &root) {
             bail!(
-                "This drive holds your HeckTunes library ({}), so syncing to {} could delete or overwrite your own music. Pick the Echo Mini's card instead.",
+                "This drive holds your HeckTunes library ({}), so syncing to {} could delete or overwrite your own music. Pick the HeckPod's card instead.",
                 library_root.display(),
                 card.display()
             );
@@ -152,7 +152,7 @@ mod tests {
         assert!(!before.is_empty());
         let err = prepare(&lib, &x).err().expect("syncing onto the library must be refused");
         assert!(err.to_string().contains("holds your HeckTunes library"), "{err}");
-        assert!(err.to_string().contains("Echo Mini's card"), "{err}");
+        assert!(err.to_string().contains("HeckPod's card"), "{err}");
         // The same drive spelled differently (case) is still the same drive on Windows and macOS.
         #[cfg(any(windows, target_os = "macos"))]
         {

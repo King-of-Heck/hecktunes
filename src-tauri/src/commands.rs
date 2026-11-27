@@ -1,9 +1,10 @@
+use crate::convert::ConvertService;
 use crate::device::detect::{self, Volume};
 use crate::device::plan::PlanSummary;
 use crate::device::service::SyncService;
 use crate::import::jobs::{Command, ImportQueue, JobChoice};
 use crate::library::{
-    editing, AlbumEdit, AlbumRow, Library, PlaylistEntry, PlaylistRow, Selection, SelectionKind, SongRow, TrackEdit, TrackRow,
+    editing, AlbumEdit, AlbumRow, Library, PlaylistEntry, PlaylistRow, Selection, SelectionKind, SongRow, SyncAs, TrackEdit, TrackRow,
 };
 use crate::settings::{self, Settings, SettingsView};
 use std::path::PathBuf;
@@ -14,6 +15,8 @@ pub struct AppState {
     pub lib: Arc<Mutex<Library>>,
     pub queue: ImportQueue,
     pub sync: SyncService,
+    /// Convert to AAC.
+    pub convert: ConvertService,
     pub player: crate::player::PlayerService,
     pub settings: SettingsState,
     /// False when the library folder was missing at startup (e.g. its drive isn't connected):
@@ -154,10 +157,13 @@ pub fn vinyl_preview(state: State<AppState>, path: String, at_ms: u64) -> CmdRes
     Ok(())
 }
 
-/// Library files must not be rewritten or deleted while an Echo Mini sync reads them.
-fn library_change_allowed(syncing: bool) -> Result<(), String> {
+/// Library files must not be rewritten or deleted while an HeckPod sync reads them, or while
+/// albums are being converted to AAC (ffmpeg reads the FLACs and writes beside them).
+fn library_change_allowed(syncing: bool, converting: bool) -> Result<(), String> {
     if syncing {
-        Err("Wait for the Echo Mini sync to finish first.".to_string())
+        Err("Wait for the HeckPod sync to finish first.".to_string())
+    } else if converting {
+        Err("Wait for the AAC conversion to finish first.".to_string())
     } else {
         Ok(())
     }
@@ -179,7 +185,7 @@ fn library_ready(state: &AppState) -> Result<(), String> {
 /// Library files may change: the folder is there and no sync is reading it.
 fn library_change_ready(state: &AppState) -> Result<(), String> {
     library_ready(state)?;
-    library_change_allowed(state.sync.is_running())
+    library_change_allowed(state.sync.is_running(), state.convert.is_busy())
 }
 
 /// How long to wait for the player to let go of a file before refusing a library change.
@@ -258,6 +264,42 @@ pub fn list_songs(state: State<AppState>) -> CmdResult<Vec<SongRow>> {
     state.lib.lock().unwrap().list_songs().map_err(err)
 }
 
+/// Why Convert to AAC can't be used on this install (`None` when it can).
+#[tauri::command(async)]
+pub fn convert_unavailable(state: State<AppState>) -> Option<String> {
+    state.convert.unavailable_reason()
+}
+
+/// Queues the album for Convert to AAC; progress arrives as "convert" events.
+#[tauri::command(async)]
+pub fn convert_album(state: State<AppState>, album_id: i64, options: crate::convert::ConvertOptions) -> CmdResult<()> {
+    library_ready(&state)?;
+    if state.sync.is_running() {
+        return Err("Wait for the HeckPod sync to finish first.".to_string());
+    }
+    state.convert.enqueue(album_id, options).map_err(err)
+}
+
+#[tauri::command(async)]
+pub fn cancel_convert(state: State<AppState>, album_id: i64) -> CmdResult<()> {
+    state.convert.cancel(album_id);
+    Ok(())
+}
+
+/// Deletes the album's AAC copies and sets it back to syncing its FLAC files.
+#[tauri::command(async)]
+pub fn remove_aac(state: State<AppState>, album_id: i64) -> CmdResult<()> {
+    library_change_ready(&state)?;
+    crate::convert::remove_copies(&mut state.lib.lock().unwrap(), album_id).map(|_| ()).map_err(err)
+}
+
+/// Chooses whether the album's FLAC files or its AAC copies go to the HeckPod.
+#[tauri::command(async)]
+pub fn set_album_sync_as(state: State<AppState>, album_id: i64, sync_as: SyncAs) -> CmdResult<()> {
+    library_ready(&state)?;
+    state.lib.lock().unwrap().set_album_sync_as(album_id, sync_as).map_err(err)
+}
+
 /// Removes the album from the library and deletes its folder in the library root.
 #[tauri::command(async)]
 pub fn delete_album(state: State<AppState>, album_id: i64) -> CmdResult<()> {
@@ -331,6 +373,9 @@ pub fn preview_sync(state: State<AppState>, card: String) -> CmdResult<PlanSumma
 #[tauri::command(async)]
 pub fn start_sync(app: AppHandle, state: State<AppState>, card: String) -> CmdResult<()> {
     library_ready(&state)?;
+    if state.convert.is_busy() {
+        return Err("Wait for the AAC conversion to finish first.".to_string());
+    }
     state
         .sync
         .start(PathBuf::from(card), move |event| {
@@ -397,8 +442,10 @@ mod guard_tests {
 
     #[test]
     fn library_changes_are_refused_only_while_syncing() {
-        assert!(library_change_allowed(false).is_ok());
-        assert_eq!(library_change_allowed(true).unwrap_err(), "Wait for the Echo Mini sync to finish first.");
+        assert!(library_change_allowed(false, false).is_ok());
+        assert_eq!(library_change_allowed(true, false).unwrap_err(), "Wait for the HeckPod sync to finish first.");
+        assert_eq!(library_change_allowed(true, true).unwrap_err(), "Wait for the HeckPod sync to finish first.");
+        assert_eq!(library_change_allowed(false, true).unwrap_err(), "Wait for the AAC conversion to finish first.");
     }
 
     #[test]

@@ -3,7 +3,7 @@ use serde::Serialize;
 use std::path::{Path, PathBuf};
 use sysinfo::Disks;
 
-/// Volume label of the Echo Mini's own (internal) storage when connected over USB.
+/// Volume label of the HeckPod's own (internal) storage when connected over USB.
 pub const PLAYER_INTERNAL_LABEL: &str = "ECHO MINI";
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -51,7 +51,7 @@ pub fn is_candidate(root: &Path) -> bool {
     }
 }
 
-/// Drives the user might pick as the Echo Mini card, sorted by mount point.
+/// Drives the user might pick as the HeckPod card, sorted by mount point.
 pub fn list_volumes() -> Vec<Volume> {
     let Ok(disks) = Disks::new_with_refreshed_list() else { return Vec::new() };
     let mut out: Vec<Volume> = disks
